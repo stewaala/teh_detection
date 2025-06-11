@@ -219,3 +219,51 @@ Zc1, Zc2 → Y (direct effects, controlled by copula)
 - Others available for different distributions
 
 This framework is particularly useful for sensitivity analysis in causal inference, where you want to test how robust your causal conclusions are to different assumptions about unmeasured confounding.
+
+
+## Discrete settings
+In order to simulate discrete data settings, it is as simple as changing the family of the model to a binomial.
+
+```{r discrete-multivariate-gaussian, eval=FALSE}
+library(causl)
+
+## MULTIVARIATE GAUSSIAN PARAMETERIZATION
+# Simpler approach using multivariate normal copula
+pars <- list(
+  # MARGINAL PARAMETERS (same as before)
+  Zc1 = list(beta = c(1), phi = 1),    # Zc1 ~ N(1, 1)
+  Zc2 = list(beta = c(1), phi = 1),    # Zc2 ~ N(1, 1)  
+  X = list(beta = c(-1,1,1)),           # Treatment model (note: different intercept)
+  Y = list(beta = c(1,1), phi = 1),     # Outcome model
+  
+  # COPULA CORRELATION MATRIX
+  cop = list(
+    beta = matrix(c(1,0,    # Row 1: correlations for Zc1 (Z3 in matrix notation)
+                    1,0,    # Row 2: correlations for Zc2 (Z4 in matrix notation)  
+                    0,0),   # Row 3: correlations for Y|do(X)
+                  nrow = 2) # 2x3 matrix structure
+  )
+)
+
+set.seed(1)  # For reproducible results
+
+# FAMILY SPECIFICATION (simpler structure)
+fams <- list(c(5,5),  # Both covariates are Gaussian
+            5,        # Treatment is Bernoulli
+            5,        # Outcome is Gaussian  
+            1)        # Copula is Gaussian
+
+# GENERATE DATA
+data_samples_mvg <- causalSamp(
+  10000,  # Sample size
+  formulas = list(
+    list(Zc1~1, Zc2~1),  # Both covariates are marginal (intercept only)
+    X ~ Zc1 + Zc2,       # Treatment depends on covariates
+    Y ~ X,               # Outcome depends on treatment
+    ~ X                  # Copula depends on treatment
+  ), 
+  family = fams, 
+  pars = pars
+)
+head(data_samples_mvg)
+```
