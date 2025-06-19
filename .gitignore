@@ -1,0 +1,12 @@
+# Ignore output directory
+simulations/TrialEnvs/
+
+# Ignore log file
+simulations/trials.log
+
+# Optional: ignore other temporary files
+*.Rhistory
+*.RData
+*.Rdata
+*.tmp
+
