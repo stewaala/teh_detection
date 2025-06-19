@@ -3,7 +3,10 @@
 # ================================================
 
 # --- 0) PARAMETERS (modify as needed) ---
-out_dir <- "TrialEnvs"         # folder where your .Rdata files live
+#out_dir <- "TrialEnvs"         # folder where your .Rdata files live
+# at the top of make_mape_plot.R
+out_dir <- "~/teh_detection/simulations/TrialEnvs"
+
 output_plot <- "mape_plot.png" # name of the saved chart
 # (The code will auto‐discover whatever n and rho you actually ran.)
 
@@ -18,6 +21,12 @@ files <- list.files(
   pattern    = "\\.Rdata$",
   full.names = TRUE
 )
+
+# ==== DIAGNOSTIC CHECK #1: what did we actually find? ====
+cat("Looking in:", normalizePath(out_dir), "\n")
+cat("Found", length(files), " .Rdata files:\n")
+print(head(files))
+
 
 # --- 3) READ & EXTRACT METRICS INTO A DATA FRAME ---
 res_list <- lapply(files, function(fpath) {
@@ -48,15 +57,30 @@ res_list <- lapply(files, function(fpath) {
 
 res_df <- bind_rows(res_list)
 
-# --- 4) RESHAPE AND AVERAGE ACROSS TRIALS ---
+# temp debug stuff
+cat("Columns in res_df:\n")
+print(names(res_df))
+cat("Number of rows in res_df:", nrow(res_df), "\n")
+# end temp debug stuff
+
+# # --- 4) RESHAPE AND AVERAGE ACROSS TRIALS ---
 plot_df <- res_df %>%
   pivot_longer(
-    cols      = c(GRF, RRCF),
+    cols      = -c(trial, n, rho),
     names_to  = "Method",
     values_to = "MAPE"
   ) %>%
   group_by(n, rho, Method) %>%
-  summarize(Avg_MAPE = mean(MAPE), .groups = "drop")
+  summarise(Avg_MAPE = mean(MAPE), .groups = "drop")
+
+# plot_df <- res_df %>%
+#   pivot_longer(
+#     cols      = c(GRF, RRCF),
+#     names_to  = "Method",
+#     values_to = "MAPE"
+#   ) %>%
+#   group_by(n, rho, Method) %>%
+#   summarize(Avg_MAPE = mean(MAPE), .groups = "drop")
 
 # --- 5) MAKE THE CHART ---
 p <- ggplot(plot_df, aes(x = n, y = Avg_MAPE,

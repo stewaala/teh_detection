@@ -24,10 +24,10 @@ unlink(out_dir, recursive = TRUE, force = TRUE)
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 # ----- 2) Define parameters -----
-#trials <- 100
-#ns = c(2500, 5000, 7500, 10000)
 trials <- 100
-ns = c(100, 200, 1000)
+ns = c(2500, 5000, 7500, 10000)
+# trials <- 100
+# ns = c(100, 200, 1000)
 rhos = c(0.25, 0.50, 0.75)
 
 param_grid <- expand.grid(

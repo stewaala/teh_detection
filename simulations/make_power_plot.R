@@ -3,7 +3,8 @@
 # ================================================
 
 # --- 0) PARAMETERS (modify as needed) ---
-out_dir     <- "TrialEnvs"         # where your .Rdata files live
+#out_dir     <- "TrialEnvs"         # where your .Rdata files live
+out_dir <- "~/teh_detection/simulations/TrialEnvs"
 output_plot <- "power_plot.png"    # where the chart will be saved
 alpha       <- 0.05                # significance threshold for “power”
 # (This will pick up whatever n and rho you actually ran.)
