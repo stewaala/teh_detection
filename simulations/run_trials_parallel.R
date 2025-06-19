@@ -18,14 +18,14 @@ suppressMessages({
 source("copula_rct.R")
 
 # ----- 1) Setup output directory -----
-out_dir <- Sys.getenv("OUTPUT_DIR", unset = "~/outputs/TrialEnvs")
+out_dir <- Sys.getenv("OUTPUT_DIR", unset = "TrialEnvs")
 cat("Initializing output directory:", out_dir, "\n")
 unlink(out_dir, recursive = TRUE, force = TRUE)
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 # ----- 2) Define parameters -----
 trials <- 11
-ns    <- c(100)
+ns    <- c(200)
 rhos  <- c(0.5)
 
 param_grid <- expand.grid(
