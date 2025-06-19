@@ -9,4 +9,4 @@ simulations/trials.log
 *.RData
 *.Rdata
 *.tmp
-
+*.png
