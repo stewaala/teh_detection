@@ -24,9 +24,10 @@ unlink(out_dir, recursive = TRUE, force = TRUE)
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 # ----- 2) Define parameters -----
-trials <- 100
+#trials <- 100
 #ns = c(2500, 5000, 7500, 10000)
-ns = c(2500, 5000)
+trials <- 10
+ns = c(100, 200, 1000)
 rhos = c(0.25, 0.5, 0.75)
 
 param_grid <- expand.grid(
@@ -84,7 +85,22 @@ run_one <- function(row) {
   # --- save results ---
   fname <- sprintf("T%03d_n%05d_rho%02d.Rdata",
                    trial, n, as.integer(rho * 100))
-  save.image(file.path(out_dir, fname))
+  
+  #save.image(file.path(out_dir, fname))
+  
+  save(
+    data, x.train, x.test,
+    y.train, y.test,
+    t.train, t.test,
+    crte.test,
+    forest.grf, forest.glm,
+    pred.grf, pred.glm,
+    mape.grf, mape.glm,
+    p.grf, p.glm,
+    vi.output,
+    file = file.path(out_dir, fname)
+  )
+  
   
   end_time <- Sys.time()
   cat(sprintf("[DONE ] trial=%03d | duration=%s | mape=(%.4f,%.4f) | p=(%.4g,%.4g) at %s\n",
