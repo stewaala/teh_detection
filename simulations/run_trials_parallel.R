@@ -26,9 +26,9 @@ dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 # ----- 2) Define parameters -----
 #trials <- 100
 #ns = c(2500, 5000, 7500, 10000)
-trials <- 10
+trials <- 100
 ns = c(100, 200, 1000)
-rhos = c(0.25, 0.5, 0.75)
+rhos = c(0.25, 0.50, 0.75)
 
 param_grid <- expand.grid(
   trial = seq_len(trials),
@@ -87,19 +87,33 @@ run_one <- function(row) {
                    trial, n, as.integer(rho * 100))
   
   #save.image(file.path(out_dir, fname))
+  # inside your trial function, *after* all local objects have been created:
+  # save(
+  #   list = ls(all.names = TRUE),
+  #   file = file.path(out_dir, fname)
+  # )
   
   save(
-    data, x.train, x.test,
-    y.train, y.test,
-    t.train, t.test,
-    crte.test,
-    forest.grf, forest.glm,
-    pred.grf, pred.glm,
-    mape.grf, mape.glm,
-    p.grf, p.glm,
-    vi.output,
-    file = file.path(out_dir, fname)
+    mape_grf,
+    mape_glm,
+    pval_grf,
+    pval_glm,
+    file     = file.path(out_dir, fname),
+    compress = "xz"        # or "gzip" for a good trade‐off
   )
+  
+  # save(
+  #   data, x.train, x.test,
+  #   y.train, y.test,
+  #   t.train, t.test,
+  #   crte.test,
+  #   forest.grf, forest.glm,
+  #   pred.grf, pred.glm,
+  #   mape.grf, mape.glm,
+  #   p.grf, p.glm,
+  #   vi.output,
+  #   file = file.path(out_dir, fname)
+  # )
   
   
   end_time <- Sys.time()
