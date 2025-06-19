@@ -24,7 +24,7 @@ unlink(out_dir, recursive = TRUE, force = TRUE)
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 # ----- 2) Define parameters -----
-trials <- 10
+trials <- 11
 ns    <- c(100)
 rhos  <- c(0.5)
 
