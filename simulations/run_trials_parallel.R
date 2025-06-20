@@ -20,8 +20,12 @@ source("copula_rct.R")
 # ----- 1) Setup output directory -----
 out_dir <- Sys.getenv("OUTPUT_DIR", unset = "TrialEnvs")
 cat("Initializing output directory:", out_dir, "\n")
-unlink(out_dir, recursive = TRUE, force = TRUE)
+#unlink(out_dir, recursive = TRUE, force = TRUE)
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+# 
+# # write master PID so we can kill the parent later
+# master_pid_file <- file.path(out_dir, "run_trials.master.pid")
+# writeLines(as.character(Sys.getpid()), master_pid_file)
 
 # ----- 2) Define parameters -----
 trials <- 100
@@ -39,9 +43,24 @@ param_grid <- expand.grid(
 
 # ----- 3) Worker function -----
 run_one <- function(row) {
+  # 
+  # # register this worker’s PID so we can kill stragglers
+  # pids_file <- file.path(out_dir, "run_trials.pids.txt")
+  # write(Sys.getpid(), pids_file, append = TRUE)
+      
   trial <- row$trial
   n     <- row$n
   rho   <- row$rho
+  
+  # --- save results ---
+  fname <- sprintf("T%03d_n%05d_rho%02d.Rdata",
+                   trial, n, as.integer(rho * 100))
+  
+  outfile <- file.path(out_dir, fname)
+  if (file.exists(outfile)) {
+    message("Skipping trial (already exists): ", outfile)
+    return(NULL)
+  }
   
   start_time <- Sys.time()
   cat(sprintf("[START] trial=%03d | n=%05d | rho=%.2f at %s\n",
@@ -81,18 +100,7 @@ run_one <- function(row) {
   an_glm     <- anova(base_mod, mod_glm, test = "Chisq")
   pval_grf   <- 1 - pchisq(an_grf$Deviance[2], df = 1)
   pval_glm   <- 1 - pchisq(an_glm$Deviance[2], df = 1)
-  
-  # --- save results ---
-  fname <- sprintf("T%03d_n%05d_rho%02d.Rdata",
-                   trial, n, as.integer(rho * 100))
-  
-  #save.image(file.path(out_dir, fname))
-  # inside your trial function, *after* all local objects have been created:
-  # save(
-  #   list = ls(all.names = TRUE),
-  #   file = file.path(out_dir, fname)
-  # )
-  
+
   save(
     mape_grf,
     mape_glm,
@@ -101,21 +109,7 @@ run_one <- function(row) {
     file     = file.path(out_dir, fname),
     compress = "xz"        # or "gzip" for a good trade‐off
   )
-  
-  # save(
-  #   data, x.train, x.test,
-  #   y.train, y.test,
-  #   t.train, t.test,
-  #   crte.test,
-  #   forest.grf, forest.glm,
-  #   pred.grf, pred.glm,
-  #   mape.grf, mape.glm,
-  #   p.grf, p.glm,
-  #   vi.output,
-  #   file = file.path(out_dir, fname)
-  # )
-  
-  
+
   end_time <- Sys.time()
   cat(sprintf("[DONE ] trial=%03d | duration=%s | mape=(%.4f,%.4f) | p=(%.4g,%.4g) at %s\n",
               trial,

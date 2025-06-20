@@ -22,10 +22,10 @@ files <- list.files(
   full.names = TRUE
 )
 
-# ==== DIAGNOSTIC CHECK #1: what did we actually find? ====
-cat("Looking in:", normalizePath(out_dir), "\n")
-cat("Found", length(files), " .Rdata files:\n")
-print(head(files))
+# # ==== DIAGNOSTIC CHECK #1: what did we actually find? ====
+# cat("Looking in:", normalizePath(out_dir), "\n")
+# cat("Found", length(files), " .Rdata files:\n")
+# print(head(files))
 
 
 # --- 3) READ & EXTRACT METRICS INTO A DATA FRAME ---
@@ -57,11 +57,11 @@ res_list <- lapply(files, function(fpath) {
 
 res_df <- bind_rows(res_list)
 
-# temp debug stuff
-cat("Columns in res_df:\n")
-print(names(res_df))
-cat("Number of rows in res_df:", nrow(res_df), "\n")
-# end temp debug stuff
+# # temp debug stuff
+# cat("Columns in res_df:\n")
+# print(names(res_df))
+# cat("Number of rows in res_df:", nrow(res_df), "\n")
+# # end temp debug stuff
 
 # # --- 4) RESHAPE AND AVERAGE ACROSS TRIALS ---
 plot_df <- res_df %>%
