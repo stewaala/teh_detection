@@ -10,3 +10,4 @@ simulations/trials.log
 *.Rdata
 *.tmp
 *.png
+*.log
