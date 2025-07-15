@@ -38,7 +38,10 @@ simulate_geometric <- function(n, K, seed = NULL) {
     A   = list(beta = 0),                # intercept only → p=0.5
     Y   = list(
       #beta = c(log(p0), -log(K), 0, 2 * log(K)),
-      beta = c(log(0.2), -log(K), 2., 2 * log(K)),
+      # Gamma will always sample positive values, but if the sample is very close to zero it can 
+      # cause numerical issues later on. By keeping the intercept high, the log(E[Y]) also remains high
+      # and this is less likely to happen
+      beta = c(log(1.0), -log(K), 2., 2 * log(K)),
       phi  = 1                            # dispersion for Gamma
     ),
     cop = list(
@@ -59,21 +62,6 @@ simulate_geometric <- function(n, K, seed = NULL) {
       link     = link
     )
   )
-  
-  # # 7. True potential outcomes & CRTE
-  # dat2 <- copy(dat)
-  # dat2[, A := 1]
-  # M1 <- model.matrix(forms3, dat2)
-  # 
-  # dat2[, A := 0]
-  # M0 <- model.matrix(forms3, dat2)
-  # 
-  # lp1 <- M1 %*% pars$Y$beta
-  # lp0 <- M0 %*% pars$Y$beta
-  # 
-  # dat[, Y1hat := as.numeric(exp(lp1))]
-  # dat[, Y0hat := as.numeric(exp(lp0))]
-  # dat[, CRTE   := Y1hat / Y0hat]
-  
+
   return(dat)
 }

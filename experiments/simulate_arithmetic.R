@@ -56,21 +56,5 @@ simulate_arithmetic <- function(n, K, seed = NULL) {
     )
   )
   
-  # # 7. Compute true potential outcomes & CATE
-  # #    - set A=1 to get Y1hat; A=0 for Y0hat
-  # dat2 <- copy(dat)
-  # dat2[, A := 1]
-  # M1 <- model.matrix(forms3, dat2)
-  # 
-  # dat2[, A := 0]
-  # M0 <- model.matrix(forms3, dat2)
-  # 
-  # lp1 <- M1 %*% pars$Y$beta
-  # lp0 <- M0 %*% pars$Y$beta
-  # 
-  # dat[, Y1hat := as.numeric(lp1)]
-  # dat[, Y0hat := as.numeric(lp0)]
-  # dat[, CATE  := Y1hat - Y0hat]
-  
   return(dat)
 }

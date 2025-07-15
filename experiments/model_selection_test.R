@@ -2,6 +2,7 @@ library(data.table)
 library(ggplot2)
 
 is_Arithmetic <- FALSE
+set.seed(42)
 
 #––– Parameters ––––––––––––––––––––––––––––––––––––––––––––––––––
 sample_sizes <- c(100, 500, 1000)
@@ -16,10 +17,10 @@ results <- rbindlist(
         n_correct <- sum(
           replicate(n_rep, {
             if (is_Arithmetic) {
-              df <- simulate_arithmetic(n = n, K = K, seed = 42)
+              df <- simulate_arithmetic(n = n, K = K)
             }
             else {
-              df <- simulate_geometric(n = n, K = K, seed = 42)
+              df <- simulate_geometric(n = n, K = K)
             }
 
             m_id  <- glm(Y ~ X1 + X2 + Z + A + Z:A,
@@ -41,12 +42,13 @@ results <- rbindlist(
 
 #––– Plot ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 ggplot(results, aes(x = factor(n), y = pct, color = factor(K), group = factor(K))) +
-  geom_line(linewidth = 1) +      # ← replaced size with linewidth
+  geom_line(linewidth = 1) +
   geom_point(size = 2) +
   labs(
-    title = "BIC Accuracy on Arithmetic DGP",
+    title = if (is_Arithmetic) "BIC Accuracy on Arithmetic DGP" else "BIC Accuracy on Geometric DGP",
     x     = "Sample size (n)",
     y     = "BIC % correct (identity model)",
     color = expression(K)
   ) +
   theme_minimal(base_size = 14)
+
