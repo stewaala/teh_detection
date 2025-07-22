@@ -172,7 +172,9 @@ copula_rct_sim <- function(n,
   ## 9. Attach ground‑truth columns & clean up ----------------------
   dat[, `:=`(
     CATE = CATE,
-    CRTE = CRTE
+    CRTE = CRTE,
+    p1 = p1,
+    p0 = p0
   )]
   dat[, E := NULL]
   
