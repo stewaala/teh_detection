@@ -65,7 +65,8 @@ print(combined_plot)
 
 # Save to PDF with timestamped filename
 timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
-filename  <- paste0("p0_boxplots_", timestamp, ".pdf")
+chart_path = '/home/rstudio/teh_detection/experiments/charts/'
+filename  <- paste0(chart_path, "p0_boxplots_", timestamp, ".pdf")
 
 ggsave(
   filename,
