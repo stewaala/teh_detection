@@ -4,6 +4,8 @@ simulations/TrialEnvs/
 # Ignore log file
 simulations/trials.log
 
+charts
+
 # Optional: ignore other temporary files
 *.Rhistory
 *.RData
