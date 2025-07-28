@@ -12,39 +12,31 @@ suppressMessages({
   library(parallel)
 })
 
-# ----- 1) Parse command-line arguments -----
+# Parse and validate command‑line argument: link_type must be "log" or "identity"
 args <- commandArgs(trailingOnly = TRUE)
-# Defaults
-link_type <- "log"
-#p_base    <- 0.10
-p_base    <- 0.16253
-
-# Helper to extract named args: --link_type and --baseline
-if(length(args) > 0) {
-  for(i in seq(1, length(args), by = 2)) {
-    name  <- args[i]
-    value <- args[i + 1]
-    if(name == "--link_type") {
-      link_type <- value
-    } else if(name == "--baseline") {
-      p_base <- as.numeric(value)
-    }
-  }
+if (length(args) != 1) {
+  stop("Error: must supply exactly one argument: link_type = 'log' or 'identity'")
 }
+link_type <- args[[1]]
+if (!link_type %in% c("log", "identity")) {
+  stop("Error: link_type must be either 'log' or 'identity', not '", link_type, "'")
+}
+cat("⏳ Running with link_type =", link_type, "\n")
 
-cat("Running with link_type =", link_type, "and p_base =", p_base, "\n")
-
-# ----- 2) Source the simulator -----
-source("copula_rct_sim.R")  # must define copula_rct_sim()
-
-# ----- 3) Setup output directory -----
-out_dir <- Sys.getenv("OUTPUT_DIR", unset = "TrialEnvs")
+p_base    <- 0.16253
+source("copula_rct_sim.R")
+out_dir <- "TrialEnvs"
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 # ----- 4) Define parameter grid -----
-trials     <- 100
-ns         <- c(2500, 5000, 7500, 10000)
-rhos       <- c(0.25, 0.50, 0.75)
+# trials     <- 100
+# ns         <- c(2500, 5000, 7500, 10000)
+# rhos       <- c(0.25, 0.50, 0.75)
+
+trials     <- 2
+ns         <- c(2500)
+rhos       <- c(0.25)
+
 param_grid <- expand.grid(
   trial     = seq_len(trials),
   n         = ns,
@@ -60,9 +52,9 @@ run_one <- function(row) {
   
   # filename includes all key parameters
   fname <- sprintf(
-    "T%03d_n%05d_rho%02d_link-%s_base-%.5f.Rdata",
+    "T%03d_n%05d_rho%02d_link-%s.Rdata",
     trial, n, as.integer(rho * 100),
-    link_type, p_base
+    link_type
   )
   outfile <- file.path(out_dir, fname)
   if (file.exists(outfile)) {
