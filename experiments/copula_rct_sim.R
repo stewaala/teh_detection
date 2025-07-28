@@ -174,7 +174,8 @@ copula_rct_sim <- function(n,
     CATE = CATE,
     CRTE = CRTE,
     p1 = p1,
-    p0 = p0
+    p0 = p0,
+    delta = delta
   )]
   dat[, E := NULL]
   
