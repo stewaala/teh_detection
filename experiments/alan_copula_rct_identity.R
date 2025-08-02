@@ -4,7 +4,7 @@ library(data.table)
 alan_copula_rct_identity <- function(n,
                            rho        = 0.50,
                            seed       = 111,
-                           p_base     = 0.20) {
+                           p_base     = 0.23) {
   
   ##########################################################################################
   # ensure the user has passed rho/p_base combination that will generate valid probabilities
@@ -94,9 +94,7 @@ alan_copula_rct_identity <- function(n,
   dat[, Y := as.integer(pnorm(E) < ifelse(A==1, p1, p0))]
   
   dat[, `:=`(
-    CATE = CATE,
-    p0=p0,
-    p1=p1
+    CATE = CATE
   )]
   dat[, E := NULL]
   
