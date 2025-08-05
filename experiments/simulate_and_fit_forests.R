@@ -227,87 +227,100 @@ run_trials <- function(n,
                        trials,
                        link_type = c("log", "identity"),
                        p_base = NULL,
-                       num_trees=200) {
+                       num_trees = 200) {
   
-  ## --------------------  package setup  -------------------- ##
-  library(causl)
-  library(data.table)
-  library(grf)
-  library(rrcf)
-  library(parallel)
+  ## ---  packages quietly --------------------------------------------
+  suppressMessages({
+    library(causl);  library(data.table)
+    library(grf);    library(rrcf)
+    library(parallel)
+  })
+  link_type <- match.arg(link_type)
   
-  link_type <- match.arg(link_type)   # enforce valid input
-  out_dir <- "data"
-  dir.create(out_dir, showWarnings = FALSE)
+  out_dir <- "data"; dir.create(out_dir, showWarnings = FALSE)
   fname_base <- make_base_filename(n, rho, link_type, p_base)
   
+  ## --- (A) open log file --------------------------------------------
   log_file <- file.path(out_dir, paste0("log_", fname_base, ".txt"))
   log_con  <- file(log_file, open = "wt")
   
-  ## --------------------  helper : one trial  ---------------- ##
-  # idx runs 1:trials; we pass idx as RNG seed to copula_rct()
+  ## --- helper --------------------------------------------------------
   one_trial <- function(idx) {
-    
-    ## 1.  draw data  -------------------------------------------------
-    #dat <- copula_rct(n, rho, idx)
-    
-    sim_fun <- if (link_type == "log") copula_rct_log else copula_rct_identity
-    sim_args <- list(n = n, rho = rho, seed = idx)
-    if (!is.null(p_base)) sim_args$p_base <- p_base          # pass only if given
-    dat <- do.call(sim_fun, sim_args)
-    
-    split <- sample(seq_len(n), size = 0.8 * n)
-    #x          <- dat[, !c("A", "Y", "CRTE"), with = FALSE]
-    x <- dat[, !c("A", "Y", "CRTE", "CATE"), with = FALSE]
-    
-    x.train    <- x[ split, ]
-    x.test     <- x[-split, ]
-    y.train    <- dat$Y[ split]
-    y.test     <- dat$Y[-split]
-    t.train    <- dat$A[ split]
-    t.test     <- dat$A[-split]
-    crte.test  <- dat$CRTE[-split]
-    
-    ## 2.  fit forests  -----------------------------------------------
-    forest.grf <- causal_forest(x.train, y.train, t.train, W.hat = 0.5, num.trees = num_trees, seed = 1234)
-    forest.glm <- rr_causal_forest(x.train, y.train, t.train, rct = TRUE, num.trees = num_trees, seed = 1234)
-    
-    ## 3.  predictions & MAPE  ----------------------------------------
-    pred.grf <- rr_predict(forest.grf, x.test)
-    pred.glm <- rr_predict(forest.glm, x.test)
-    
-    mape.grf <- mean(abs((crte.test - pred.grf) / crte.test))
-    mape.glm <- mean(abs((crte.test - pred.glm) / crte.test))
-    
-    ## 4.  calibration p‑values (LR test) ------------------------------
-    anova.data <- data.frame(cbind(y.test, t.test, x.test))
-    base       <- glm(y.test ~ ., family = poisson, data = anova.data)
-    
-    add.grf <- glm(y.test ~ ., family = poisson, data = cbind(anova.data, t.test * log(pred.grf)))
-    add.glm <- glm(y.test ~ ., family = poisson, data = cbind(anova.data, t.test * log(pred.glm)))
-    
-    p.grf <- 1 - pchisq(anova(base, add.grf)$Deviance[2], 1)
-    p.glm <- 1 - pchisq(anova(base, add.glm)$Deviance[2], 1)
-    
-    ## 5.  return summary rows  ---------------------------------------
-    list(pvals = c(n, rho, p.grf,  p.glm), mapes = c(n, rho, mape.grf, mape.glm))
+    tryCatch({
+      
+      ## 1. simulate ---------------------------------------------------
+      sim_fun  <- if (link_type == "log") copula_rct_log else copula_rct_identity
+      sim_args <- list(n = n, rho = rho, seed = idx)
+      if (!is.null(p_base)) sim_args$p_base <- p_base
+      dat <- suppressWarnings(do.call(sim_fun, sim_args))   # keep console quiet
+      
+      ## 2. split / fit -----------------------------------------------
+      split <- sample.int(n, size = 0.8 * n)
+      x <- dat[, !c("A", "Y", "CRTE", "CATE"), with = FALSE]
+      x.train <- x[ split, ];  x.test <- x[-split, ]
+      y.train <- dat$Y[ split]; y.test <- dat$Y[-split]
+      t.train <- dat$A[ split]; t.test <- dat$A[-split]
+      crte.test <- dat$CRTE[-split]
+      
+      forest.grf <- suppressMessages(
+        causal_forest(x.train, y.train, t.train,
+                      W.hat = 0.5, num.trees = num_trees, seed = 1234)
+      )
+      forest.glm <- suppressMessages(
+        rr_causal_forest(x.train, y.train, t.train,
+                         rct = TRUE, num.trees = num_trees, seed = 1234)
+      )
+      
+      ## 3. predictions & metrics -------------------------------------
+      pred.grf <- rr_predict(forest.grf, x.test)
+      pred.glm <- rr_predict(forest.glm, x.test)
+      
+      mape.grf <- mean(abs((crte.test - pred.grf) / crte.test))
+      mape.glm <- mean(abs((crte.test - pred.glm) / crte.test))
+      
+      anova.data <- data.frame(cbind(y.test, t.test, x.test))
+      base   <- glm(y.test ~ ., family = poisson, data = anova.data)
+      add.g  <- glm(y.test ~ ., family = poisson,
+                    data = cbind(anova.data, t.test * log(pred.grf)))
+      add.l  <- glm(y.test ~ ., family = poisson,
+                    data = cbind(anova.data, t.test * log(pred.glm)))
+      
+      p.grf <- 1 - pchisq(anova(base, add.g)$Deviance[2], 1)
+      p.glm <- 1 - pchisq(anova(base, add.l)$Deviance[2], 1)
+      
+      list(pvals = c(p.grf, p.glm), mapes = c(mape.grf, mape.glm))
+      
+    }, error = function(e) {
+      ## ---------- log & carry on ----------
+      cat(sprintf("trial %d: %s\n", idx, e$message), file = log_con)
+      return(NULL)                 # skips this trial
+    })
   }
-  ## --------------------  parallel execution  ----------------------- ##
-  res_lst <- mclapply(seq_len(trials), FUN=one_trial, mc.cores=parallel::detectCores()-1, mc.preschedule = FALSE)
-  # cat("doing it")
-  # print(res_lst)
-  # cat("end doing it")
-  ## --------------------  bind results  ----------------------------- ##
-  pvals <- do.call(rbind, lapply(res_lst, `[[`, "pvals"))
-  mapes <- do.call(rbind, lapply(res_lst, `[[`, "mapes"))
-  colnames(pvals) <- c("n", "rho", "p_grf", "p_glm")
-  colnames(mapes) <- c("n", "rho", "mape_grf", "mape_glm")
   
-  pval_file <- file.path(out_dir, paste0("pval_",  fname_base, ".rds"))
-  mape_file <- file.path(out_dir, paste0("mape_", fname_base, ".rds"))
+  ## --- parallel execution -------------------------------------------
+  res_lst <- mclapply(seq_len(trials), one_trial,
+                      mc.cores = parallel::detectCores() - 1,
+                      mc.preschedule = FALSE)
   
-  saveRDS(pvals, file = pval_file)
-  saveRDS(mapes, file = mape_file)
+  ## --- bind, removing NULLs -----------------------------------------
+  ok      <- vapply(res_lst, is.null, logical(1), USE.NAMES = FALSE)
+  good    <- res_lst[!ok]
+  
+  if (length(good) == 0) stop("All trials failed; see ", log_file)
+  
+  pvals <- do.call(rbind, lapply(good, `[[`, "pvals"))
+  mapes <- do.call(rbind, lapply(good, `[[`, "mapes"))
+  colnames(pvals) <- c("p_grf", "p_glm")
+  colnames(mapes) <- c("mape_grf", "mape_glm")
+  
+  ## --- save summaries -----------------------------------------------
+  saveRDS(pvals, file = file.path(out_dir, paste0("pval_",  fname_base, ".rds")))
+  saveRDS(mapes, file = file.path(out_dir, paste0("mape_",  fname_base, ".rds")))
+  
+  ## --- (C) tidy up log ----------------------------------------------
+  close(log_con)
+  if (file.size(log_file) == 0) unlink(log_file)   # delete empty log
+  else message("Finished with some errors. See ", log_file)
   
   invisible(list(pvals = pvals, mapes = mapes))
 }
@@ -320,7 +333,7 @@ power_from_rds <- function(n,
                            out_dir   = "data") {
   
   link_type <- match.arg(link_type)
-  fname_base <- fname_base <- make_base_filename(n, rho, link_type, p_base)
+  fname_base <- make_base_filename(n, rho, link_type, p_base)
   pval_file <- file.path(out_dir, paste0("pval_", fname_base, ".rds"))
   
   if (!file.exists(pval_file)) {
@@ -344,7 +357,7 @@ mape_from_rds <- function(n,
                           out_dir   = "data") {
   
   link_type <- match.arg(link_type)
-  fname_base <- fname_base <- make_base_filename(n, rho, link_type, p_base)
+  fname_base <- make_base_filename(n, rho, link_type, p_base)
   mape_file <- file.path(out_dir, paste0("mape_", fname_base, ".rds"))
   
   if (!file.exists(mape_file)) {
