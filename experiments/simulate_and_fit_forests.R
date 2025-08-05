@@ -243,6 +243,7 @@ run_trials <- function(n,
   ## --- (A) open log file --------------------------------------------
   log_file <- file.path(out_dir, paste0("log_", fname_base, ".txt"))
   log_con  <- file(log_file, open = "wt")
+  on.exit(close(log_con), add = TRUE)
   
   ## --- helper --------------------------------------------------------
   one_trial <- function(idx) {
@@ -288,7 +289,19 @@ run_trials <- function(n,
       p.grf <- 1 - pchisq(anova(base, add.g)$Deviance[2], 1)
       p.glm <- 1 - pchisq(anova(base, add.l)$Deviance[2], 1)
       
-      list(pvals = c(p.grf, p.glm), mapes = c(mape.grf, mape.glm))
+      dat_test <- data.table::copy(dat[-split])                # only test rows
+      dat_test[, `:=`(
+        crte_hat_grf = pred.grf,
+        crte_hat_glm = pred.glm,
+        trial_id     = idx
+      )]
+      
+      list(
+        dat   = dat_test,
+        pvals = c(p.grf,  p.glm),
+        mapes = c(mape.grf, mape.glm)
+      )
+      #list(pvals = c(p.grf, p.glm), mapes = c(mape.grf, mape.glm))
       
     }, error = function(e) {
       ## ---------- log & carry on ----------
@@ -308,6 +321,10 @@ run_trials <- function(n,
   
   if (length(good) == 0) stop("All trials failed; see ", log_file)
   
+  test_bundle <- data.table::rbindlist(lapply(good, `[[`, "dat"))
+  bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
+  saveRDS(test_bundle, file = bundle_file)
+  
   pvals <- do.call(rbind, lapply(good, `[[`, "pvals"))
   mapes <- do.call(rbind, lapply(good, `[[`, "mapes"))
   colnames(pvals) <- c("p_grf", "p_glm")
@@ -318,7 +335,7 @@ run_trials <- function(n,
   saveRDS(mapes, file = file.path(out_dir, paste0("mape_",  fname_base, ".rds")))
   
   ## --- (C) tidy up log ----------------------------------------------
-  close(log_con)
+  #close(log_con)
   if (file.size(log_file) == 0) unlink(log_file)   # delete empty log
   else message("Finished with some errors. See ", log_file)
   
@@ -372,4 +389,95 @@ mape_from_rds <- function(n,
   
   setNames(c(mean_grf, mean_glm), c("mean_mape_grf", "mean_mape_glm"))
 }
+
+power_from_bundle <- function(n,
+                              rho,
+                              link_type = c("log", "identity"),
+                              p_base    = NULL,
+                              alpha     = 0.05,
+                              out_dir   = "data") {
+  
+  link_type <- match.arg(link_type)
+  fname_base <- make_base_filename(n, rho, link_type, p_base)
+  bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
+  if (!file.exists(bundle_file))
+    stop("Cannot find bundle file: ", bundle_file)
+  
+  dt <- readRDS(bundle_file)
+  
+  drop_cols <- c("Y","A","CRTE","CATE",
+                 "crte_hat_grf","crte_hat_glm","trial_id")
+  cov_cols  <- setdiff(names(dt), drop_cols)
+  
+  trial_ids <- unique(dt$trial_id)
+  p_grf <- numeric(length(trial_ids))
+  p_glm <- numeric(length(trial_ids))
+  
+  for (i in seq_along(trial_ids)) {
+    sub <- dt[trial_id == trial_ids[i]]
+    
+    y.test <- sub$Y
+    t.test <- sub$A                     # <-- define it, as in run_trials()
+    
+    anova_df <- data.frame(
+      y.test = y.test,
+      t.test = t.test,
+      sub[, ..cov_cols]
+    )
+    
+    base_mod <- glm(y.test ~ ., family = poisson, data = anova_df)
+    
+    add_grf <- glm(
+      y.test ~ .,
+      family = poisson,
+      data = cbind(anova_df,
+                   t.test * log(sub$crte_hat_grf))
+    )
+    add_glm <- glm(
+      y.test ~ .,
+      family = poisson,
+      data = cbind(anova_df,
+                   t.test * log(sub$crte_hat_glm))
+    )
+    
+    p_grf[i] <- 1 - pchisq(anova(base_mod, add_grf)$Deviance[2], 1)
+    p_glm[i] <- 1 - pchisq(anova(base_mod, add_glm)$Deviance[2], 1)
+  }
+  
+  setNames(c(mean(p_grf < alpha), mean(p_glm < alpha)),
+           c("power_grf", "power_glm"))
+}
+
+mape_from_bundle <- function(n,
+                             rho,
+                             link_type = c("log", "identity"),
+                             p_base    = NULL,
+                             out_dir   = "data") {
+  
+  link_type  <- match.arg(link_type)
+  fname_base <- make_base_filename(n, rho, link_type, p_base)
+  bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
+  
+  if (!file.exists(bundle_file))
+    stop("Cannot find bundle file: ", bundle_file)
+  
+  ## ---- load test‑set bundle ----------------------------------------
+  dt <- readRDS(bundle_file)   # columns include CRTE, crte_hat_grf, crte_hat_glm, trial_id
+  
+  ## ---- per‑trial MAPE ---------------------------------------------
+  MAPE <- dt[, .(
+    mape_grf = mean(abs((CRTE - crte_hat_grf) / CRTE)),
+    mape_glm = mean(abs((CRTE - crte_hat_glm) / CRTE))
+  ),
+  by = trial_id
+  ]
+  
+  ## ---- average over trials (matches mape_from_rds) ----------------
+  mean_grf <- mean(MAPE$mape_grf)
+  mean_glm <- mean(MAPE$mape_glm)
+  
+  setNames(c(mean_grf, mean_glm),
+           c("mean_mape_grf", "mean_mape_glm"))
+}
+
 
