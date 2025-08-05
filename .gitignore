@@ -5,6 +5,7 @@ simulations/TrialEnvs/
 simulations/trials.log
 
 charts
+data
 
 # Optional: ignore other temporary files
 *.Rhistory
