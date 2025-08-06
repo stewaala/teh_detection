@@ -222,6 +222,23 @@ make_base_filename <- function(n, rho, link_type, p_base) {
   sprintf("n%05d_rho%02d_%s_%s", n, round(rho * 100), link_type, baseline_tag)
 }
 
+rd_predict <- function(object, newdata) {
+  X <- object[["X.orig"]]
+  Y <- object[["Y.orig"]]
+  W <- object[["W.orig"]]
+
+  length = dim(newdata)[1]
+  output = numeric(length)
+  for(i in 1:length){
+    fw = get_forest_weights(object, newdata[i,])
+    df = cbind.data.frame(W, fw[1:length(Y)], fw[1:length(Y)]*Y)
+    tau1 = sum(subset(df, df[,1] == 1)[,3])/sum(subset(df, df[,1] == 1)[,2])
+    tau0 = sum(subset(df, df[,1] == 0)[,3])/sum(subset(df, df[,1] == 0)[,2])
+    output[i] = tau1-tau0
+  }
+  output
+}
+
 run_trials <- function(n,
                        rho,
                        trials,
@@ -264,35 +281,36 @@ run_trials <- function(n,
       crte.test <- dat$CRTE[-split]
       
       forest.grf <- suppressMessages(
-        causal_forest(x.train, y.train, t.train,
-                      W.hat = 0.5, num.trees = num_trees, seed = 1234)
+        causal_forest(x.train, y.train, t.train, W.hat = 0.5, num.trees = num_trees, seed = 1234)
       )
       forest.glm <- suppressMessages(
-        rr_causal_forest(x.train, y.train, t.train,
-                         rct = TRUE, num.trees = num_trees, seed = 1234)
+        rr_causal_forest(x.train, y.train, t.train, rct = TRUE, num.trees = num_trees, seed = 1234)
       )
       
       ## 3. predictions & metrics -------------------------------------
-      pred.grf <- rr_predict(forest.grf, x.test)
-      pred.glm <- rr_predict(forest.glm, x.test)
+      rr_pred.grf <- rr_predict(forest.grf, x.test)
+      rr_pred.glm <- rr_predict(forest.glm, x.test)
       
-      mape.grf <- mean(abs((crte.test - pred.grf) / crte.test))
-      mape.glm <- mean(abs((crte.test - pred.glm) / crte.test))
+      rd_pred.grf <- predict(forest.grf, x.test)$predictions
+      rd_pred.glm <- rd_predict(forest.glm, x.test)
+      
+      mape.grf <- mean(abs((crte.test - rr_pred.grf) / crte.test))
+      mape.glm <- mean(abs((crte.test - rr_pred.glm) / crte.test))
       
       anova.data <- data.frame(cbind(y.test, t.test, x.test))
       base   <- glm(y.test ~ ., family = poisson, data = anova.data)
-      add.g  <- glm(y.test ~ ., family = poisson,
-                    data = cbind(anova.data, t.test * log(pred.grf)))
-      add.l  <- glm(y.test ~ ., family = poisson,
-                    data = cbind(anova.data, t.test * log(pred.glm)))
+      add.g  <- glm(y.test ~ ., family = poisson, data = cbind(anova.data, t.test * log(rr_pred.grf)))
+      add.l  <- glm(y.test ~ ., family = poisson, data = cbind(anova.data, t.test * log(rr_pred.glm)))
       
       p.grf <- 1 - pchisq(anova(base, add.g)$Deviance[2], 1)
       p.glm <- 1 - pchisq(anova(base, add.l)$Deviance[2], 1)
       
       dat_test <- data.table::copy(dat[-split])                # only test rows
       dat_test[, `:=`(
-        crte_hat_grf = pred.grf,
-        crte_hat_glm = pred.glm,
+        crte_hat_grf = rr_pred.grf,
+        crte_hat_glm = rr_pred.glm,
+        cate_hat_grf = rd_pred.grf,
+        cate_hat_glm = rd_pred.glm,
         trial_id     = idx
       )]
       
@@ -301,8 +319,6 @@ run_trials <- function(n,
         pvals = c(p.grf,  p.glm),
         mapes = c(mape.grf, mape.glm)
       )
-      #list(pvals = c(p.grf, p.glm), mapes = c(mape.grf, mape.glm))
-      
     }, error = function(e) {
       ## ---------- log & carry on ----------
       cat(sprintf("trial %d: %s\n", idx, e$message), file = log_con)
@@ -390,6 +406,15 @@ mape_from_rds <- function(n,
   setNames(c(mean_grf, mean_glm), c("mean_mape_grf", "mean_mape_glm"))
 }
 
+get_covariate_cols <- function(dt) {
+  drop_cols <- c("Y", "A",
+                 "CRTE", "CATE",
+                 "crte_hat_grf", "crte_hat_glm",
+                 "cate_hat_grf", "cate_hat_glm",
+                 "trial_id")
+  setdiff(names(dt), drop_cols)
+}
+
 power_from_bundle <- function(n,
                               rho,
                               link_type = c("log", "identity"),
@@ -404,10 +429,7 @@ power_from_bundle <- function(n,
     stop("Cannot find bundle file: ", bundle_file)
   
   dt <- readRDS(bundle_file)
-  
-  drop_cols <- c("Y","A","CRTE","CATE",
-                 "crte_hat_grf","crte_hat_glm","trial_id")
-  cov_cols  <- setdiff(names(dt), drop_cols)
+  cov_cols <- get_covariate_cols(dt)
   
   trial_ids <- unique(dt$trial_id)
   p_grf <- numeric(length(trial_ids))
@@ -480,4 +502,59 @@ mape_from_bundle <- function(n,
            c("mean_mape_grf", "mean_mape_glm"))
 }
 
+power_rd_from_bundle <- function(n,
+                                 rho,
+                                 link_type = c("log", "identity"),
+                                 p_base    = NULL,
+                                 alpha     = 0.05,
+                                 out_dir   = "data") {
+  
+  link_type <- match.arg(link_type)
+  fname_base <- make_base_filename(n, rho, link_type, p_base)
+  bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
+  if (!file.exists(bundle_file))
+    stop("Cannot find bundle file: ", bundle_file)
+  
+  ## ------------------ load bundle ------------------ ##
+  dt <- readRDS(bundle_file)
+  cov_cols <- get_covariate_cols(dt)
+  
+  trial_ids <- unique(dt$trial_id)
+  p_grf <- numeric(length(trial_ids))
+  p_glm <- numeric(length(trial_ids))
+  
+  for (i in seq_along(trial_ids)) {
+    sub <- dt[trial_id == trial_ids[i]]
+    
+    ## ---------- construct centred interaction term ----------
+    tau_bar_grf <- mean(sub$cate_hat_grf)
+    tau_bar_glm <- mean(sub$cate_hat_glm)
+    
+    int_grf <- sub$A * (sub$cate_hat_grf - tau_bar_grf)
+    int_glm <- sub$A * (sub$cate_hat_glm - tau_bar_glm)
+    
+    ## ---------- baseline model: Y ~ X + W -------------------
+    base_df <- data.frame(
+      y  = sub$Y,
+      W  = sub$A,
+      sub[, ..cov_cols]
+    )
+    base_mod <- lm(y ~ ., data = base_df)  # linear‑probability calibration
+    
+    ## ---------- augmented with GRF interaction --------------
+    add_grf <- lm(y ~ .,
+                  data = cbind(base_df, int_grf))
+    
+    ## ---------- augmented with GLM interaction --------------
+    add_glm <- lm(y ~ .,
+                  data = cbind(base_df, int_glm))
+    
+    ## ---------- 1‑df F‑tests --------------------------------
+    p_grf[i] <- anova(base_mod, add_grf)$`Pr(>F)`[2]
+    p_glm[i] <- anova(base_mod, add_glm)$`Pr(>F)`[2]
+  }
+  
+  setNames(c(mean(p_grf < alpha), mean(p_glm < alpha)),
+           c("power_grf", "power_glm"))
+}
 
