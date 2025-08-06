@@ -293,18 +293,7 @@ run_trials <- function(n,
       
       rd_pred.grf <- predict(forest.grf, x.test)$predictions
       rd_pred.glm <- rd_predict(forest.glm, x.test)
-      
-      mape.grf <- mean(abs((crte.test - rr_pred.grf) / crte.test))
-      mape.glm <- mean(abs((crte.test - rr_pred.glm) / crte.test))
-      
-      anova.data <- data.frame(cbind(y.test, t.test, x.test))
-      base   <- glm(y.test ~ ., family = poisson, data = anova.data)
-      add.g  <- glm(y.test ~ ., family = poisson, data = cbind(anova.data, t.test * log(rr_pred.grf)))
-      add.l  <- glm(y.test ~ ., family = poisson, data = cbind(anova.data, t.test * log(rr_pred.glm)))
-      
-      p.grf <- 1 - pchisq(anova(base, add.g)$Deviance[2], 1)
-      p.glm <- 1 - pchisq(anova(base, add.l)$Deviance[2], 1)
-      
+ 
       dat_test <- data.table::copy(dat[-split])                # only test rows
       dat_test[, `:=`(
         crte_hat_grf = rr_pred.grf,
@@ -314,13 +303,8 @@ run_trials <- function(n,
         trial_id     = idx
       )]
       
-      list(
-        dat   = dat_test,
-        pvals = c(p.grf,  p.glm),
-        mapes = c(mape.grf, mape.glm)
-      )
+      list(dat = dat_test)
     }, error = function(e) {
-      ## ---------- log & carry on ----------
       cat(sprintf("trial %d: %s\n", idx, e$message), file = log_con)
       return(NULL)                 # skips this trial
     })
@@ -341,69 +325,10 @@ run_trials <- function(n,
   bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
   saveRDS(test_bundle, file = bundle_file)
   
-  pvals <- do.call(rbind, lapply(good, `[[`, "pvals"))
-  mapes <- do.call(rbind, lapply(good, `[[`, "mapes"))
-  colnames(pvals) <- c("p_grf", "p_glm")
-  colnames(mapes) <- c("mape_grf", "mape_glm")
-  
-  ## --- save summaries -----------------------------------------------
-  saveRDS(pvals, file = file.path(out_dir, paste0("pval_",  fname_base, ".rds")))
-  saveRDS(mapes, file = file.path(out_dir, paste0("mape_",  fname_base, ".rds")))
-  
-  ## --- (C) tidy up log ----------------------------------------------
-  #close(log_con)
   if (file.size(log_file) == 0) unlink(log_file)   # delete empty log
   else message("Finished with some errors. See ", log_file)
   
-  invisible(list(pvals = pvals, mapes = mapes))
-}
-
-power_from_rds <- function(n,
-                           rho,
-                           link_type = c("log", "identity"),
-                           p_base    = NULL,
-                           alpha     = 0.05,
-                           out_dir   = "data") {
-  
-  link_type <- match.arg(link_type)
-  fname_base <- make_base_filename(n, rho, link_type, p_base)
-  pval_file <- file.path(out_dir, paste0("pval_", fname_base, ".rds"))
-  
-  if (!file.exists(pval_file)) {
-    stop("Cannot find file: ", pval_file)
-  }
-  
-  ## ---- load & compute power ------------------------------------------------
-  pvals <- readRDS(pval_file)          # columns: n, rho, p_grf, p_glm
-  
-  power_grf <- mean(pvals[, "p_grf"] < alpha)
-  power_glm <- mean(pvals[, "p_glm"] < alpha)
-  
-  setNames(c(power_grf, power_glm),
-           c("power_grf", "power_glm"))
-}
-
-mape_from_rds <- function(n,
-                          rho,
-                          link_type = c("log", "identity"),
-                          p_base    = NULL,
-                          out_dir   = "data") {
-  
-  link_type <- match.arg(link_type)
-  fname_base <- make_base_filename(n, rho, link_type, p_base)
-  mape_file <- file.path(out_dir, paste0("mape_", fname_base, ".rds"))
-  
-  if (!file.exists(mape_file)) {
-    stop("Cannot find file: ", mape_file)
-  }
-  
-  ## ---- load & summarise MAPE ---------------------------------------------
-  mapes <- readRDS(mape_file)          # columns: n, rho, mape_grf, mape_glm
-  
-  mean_grf <- mean(mapes[, "mape_grf"])
-  mean_glm <- mean(mapes[, "mape_glm"])
-  
-  setNames(c(mean_grf, mean_glm), c("mean_mape_grf", "mean_mape_glm"))
+  invisible(NULL)
 }
 
 get_covariate_cols <- function(dt) {
@@ -556,5 +481,64 @@ power_rd_from_bundle <- function(n,
   
   setNames(c(mean(p_grf < alpha), mean(p_glm < alpha)),
            c("power_grf", "power_glm"))
+}
+
+# ------------------------------------------------------------
+# Run a grid of (n, ρ) settings for a fixed link_type & p_base
+# ------------------------------------------------------------
+run_trials_grid <- function(n_values,
+                            rho_values,
+                            link_type = c("log", "identity"),
+                            p_base    = NULL,
+                            trials    = 100,
+                            num_trees = 200,
+                            out_dir   = "data") {
+  
+  # example usage:
+  #
+  # run_trials_grid(
+  #   n_values  = c(2500, 5000, 7500, 10000),
+  #   rho_values = c(0.00, 0.25, 0.50, 0.75),
+  #   link_type  = "log",
+  #   p_base     = NULL   # default baseline
+  # )
+  
+  link_type <- match.arg(link_type)          # validate input
+  dir.create(out_dir, showWarnings = FALSE)  # ensure folder exists
+  
+  status <- list()                           # bookkeeping
+  
+  for (n   in n_values) {
+    for (rho in rho_values) {
+      
+      # ---- does bundle already exist? ----------------------
+      fname_base  <- make_base_filename(n, rho, link_type, p_base)
+      bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
+      
+      if (file.exists(bundle_file)) {
+        message(sprintf("SKIP  n=%d rho=%.2f (%s) — bundle exists",
+                        n, rho, fname_base))
+        status[[fname_base]] <- "skipped"
+        next
+      }
+      
+      # ---- run simulations + forests -----------------------
+      message(sprintf("RUN   n=%d rho=%.2f (%s)", n, rho, fname_base))
+      tryCatch({
+        run_trials(n        = n,
+                   rho      = rho,
+                   trials   = trials,
+                   link_type = link_type,
+                   p_base   = p_base,
+                   num_trees = num_trees)
+        status[[fname_base]] <- "completed"
+      }, error = function(e) {
+        warning(sprintf("FAILED n=%d rho=%.2f : %s", n, rho, e$message))
+        status[[fname_base]] <- paste("failed:", e$message)
+      })
+    }
+  }
+  
+  invisible(status)   # return a named list of outcomes
 }
 
