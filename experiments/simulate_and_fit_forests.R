@@ -2,6 +2,102 @@ library(causl)
 library(data.table)
 
 .EEXP_H_CONST <- 1.20332119584
+.LOW_BASELINE_THRESHOLD <- 0.02  # treat p_base <= 2% as "low baseline"
+.DEFAULT_PBASE_LOG <- .EEXP_H_CONST * exp(-2)  # ≈ 0.163
+.DEFAULT_PBASE_ID  <- 0.23
+.TARGET_TEST_EVENTS <- 40
+.TEST_FRAC_DEFAULT  <- 0.20
+.TEST_FRAC_CAP      <- 0.50
+.LOW_N_TRAIN_THRESHOLD <- 2000
+
+choose_test_frac <- function(n,
+                             link_type,
+                             p_base,
+                             default = .TEST_FRAC_DEFAULT,
+                             target_events = .TARGET_TEST_EVENTS,
+                             cap = .TEST_FRAC_CAP,
+                             floor = 0.20) {
+  # effective baseline risk if user didn't override
+  p_eff <- if (is.null(p_base)) {
+    if (link_type == "log") .DEFAULT_PBASE_LOG else .DEFAULT_PBASE_ID
+  } else p_base
+  
+  # If default split already yields enough test events, keep it
+  exp_events_default <- n * default * p_eff
+  if (exp_events_default >= target_events) return(default)
+  
+  # Otherwise, enlarge split just enough (but not beyond cap)
+  tf <- target_events / (n * max(p_eff, 1e-9))
+  tf <- min(cap, max(floor, tf))
+  
+  if (tf > default + 1e-9) {
+    message(sprintf(
+      "auto test_frac=%.2f (target ~%d test events; p≈%.3f, n=%d)",
+      tf, target_events, p_eff, n
+    ))
+  }
+  tf
+}
+
+choose_forest_hparams <- function(link_type, p_base, num_trees, n_train) {
+  ultra_low <- (!is.null(p_base)) && (link_type == "log") && (p_base <= .LOW_BASELINE_THRESHOLD)
+  if (ultra_low) {
+    return(list(
+      grf  = list(num.trees = max(1000, num_trees),
+                  min.node.size = 40,
+                  sample.fraction = 0.95,
+                  ci.group.size = 1L),
+      rrcf = list(num.trees = max(1000, num_trees),
+                  min.node.size = 40,
+                  sample.fraction = 0.49)
+    ))
+  }
+  
+  # --- NEW: mild tweaks for small training sets (any link/baseline) ---
+  if (n_train <= .LOW_N_TRAIN_THRESHOLD) {
+    # scale leaf size with training size; keep sample.fraction default
+    leaf <- max(10L, as.integer(round(0.03 * n_train)))  # ~3% of train
+    return(list(
+      grf  = list(num.trees = max(500, num_trees),
+                  min.node.size = leaf),
+      rrcf = list(num.trees = max(500, num_trees),
+                  min.node.size = leaf)
+    ))
+  }
+  
+  # Default settings (covers n≥~2000 and 5% baseline case)
+  list(
+    grf  = list(num.trees = num_trees),
+    rrcf = list(num.trees = num_trees)
+  )
+}
+
+arg_filter <- function(fun, args) {
+  fn_args <- names(formals(fun))
+  args[names(args) %in% fn_args]
+}
+
+# # Pick a test split when baseline is ultra-low (≤ .LOW_BASELINE_THRESHOLD)
+# choose_test_frac <- function(n,
+#                              link_type,
+#                              p_base,
+#                              default = 0.20,
+#                              target_events = 40,  # aim for ~40 test positives
+#                              cap = 0.50,
+#                              floor = 0.20) {
+#   ultra_low <- (!is.null(p_base)) && (link_type == "log") && (p_base <= .LOW_BASELINE_THRESHOLD)
+#   if (!ultra_low) return(default)
+#   
+#   # Expected test events ≈ n * test_frac * p_base  ⇒  test_frac ≈ target/(n*p_base)
+#   tf <- target_events / (n * max(p_base, 1e-9))
+#   tf <- min(cap, max(floor, tf))
+#   
+#   if (tf > default + 1e-9) {
+#     message(sprintf("auto test_frac=%.2f to target ~%d test events at p_base=%.3f",
+#                     tf, target_events, p_base))
+#   }
+#   tf
+# }
 
 # ------------------------------------------------------------------------------
 # The following function replicates the functionality of copula_rct() in 
@@ -210,16 +306,30 @@ copula_rct_identity <- function(n,
   return(dat[])
 }
 
-make_base_filename <- function(n, rho, link_type, p_base) {
+# ------------------------------------------------------------------------------
+# Format just the baseline tag
+# ------------------------------------------------------------------------------
+format_baseline_tag <- function(p_base) {
   if (is.null(p_base)) {
-    baseline_tag <- "defaultBaseline"
+    "defaultBaseline"
   } else {
-    # round to three decimals, then strip trailing zeros / trailing dot
+    # round to three decimals, then strip trailing zeros and trailing dot
     bstr <- formatC(p_base, format = "f", digits = 3)
     bstr <- sub("0+$", "", sub("\\.$", "", bstr))
-    baseline_tag <- paste0("baseline", bstr)
+    paste0("baseline", bstr)
   }
-  sprintf("n%05d_rho%02d_%s_%s", n, round(rho * 100), link_type, baseline_tag)
+}
+
+# ------------------------------------------------------------------------------
+# Build the full filename base using the new helper
+# ------------------------------------------------------------------------------
+make_base_filename <- function(n, rho, link_type, p_base) {
+  baseline_tag <- format_baseline_tag(p_base)
+  sprintf("n%05d_rho%02d_%s_%s",
+          n,
+          round(rho * 100),
+          link_type,
+          baseline_tag)
 }
 
 rd_predict <- function(object, newdata) {
@@ -244,7 +354,8 @@ run_trials <- function(n,
                        trials,
                        link_type = c("log", "identity"),
                        p_base = NULL,
-                       num_trees = 200) {
+                       num_trees = 200,
+                       test_frac = NULL) {
   
   ## ---  packages quietly --------------------------------------------
   suppressMessages({
@@ -256,6 +367,10 @@ run_trials <- function(n,
   
   out_dir <- "data"; dir.create(out_dir, showWarnings = FALSE)
   fname_base <- make_base_filename(n, rho, link_type, p_base)
+  
+  # after fname_base:
+  test_frac_eff <- if (is.null(test_frac)) choose_test_frac(n, link_type, p_base) else test_frac
+  n_train <- as.integer(round((1 - test_frac_eff) * n))  # optional: precompute once
   
   ## --- (A) open log file --------------------------------------------
   log_file <- file.path(out_dir, paste0("log_", fname_base, ".txt"))
@@ -273,18 +388,41 @@ run_trials <- function(n,
       dat <- suppressWarnings(do.call(sim_fun, sim_args))   # keep console quiet
       
       ## 2. split / fit -----------------------------------------------
-      split <- sample.int(n, size = 0.8 * n)
+      # # decide test split
+      split <- sample.int(n, size = as.integer(round((1 - test_frac_eff) * n)))
       x <- dat[, !c("A", "Y", "CRTE", "CATE"), with = FALSE]
       x.train <- x[ split, ];  x.test <- x[-split, ]
       y.train <- dat$Y[ split]; y.test <- dat$Y[-split]
       t.train <- dat$A[ split]; t.test <- dat$A[-split]
       crte.test <- dat$CRTE[-split]
+
+      # choose hparams
+      hp <- choose_forest_hparams(link_type, p_base, num_trees, n_train)
       
-      forest.grf <- suppressMessages(
-        causal_forest(x.train, y.train, t.train, W.hat = 0.5, num.trees = num_trees, seed = 1234)
+      # GRF
+      grf_args <- c(
+        list(X = x.train, Y = y.train, W = t.train, W.hat = 0.5, seed = 1234),
+        arg_filter(causal_forest, hp$grf)
       )
-      forest.glm <- suppressMessages(
-        rr_causal_forest(x.train, y.train, t.train, rct = TRUE, num.trees = num_trees, seed = 1234)
+      forest.grf <- tryCatch(
+        suppressMessages(do.call(causal_forest, grf_args)),
+        error = function(e) {
+          cat(sprintf("trial %d [GRF]: %s\n", idx, e$message), file = log_con)
+          stop(e)
+        }
+      )
+      
+      # RRCF
+      rrcf_args <- c(
+        list(X = x.train, Y = y.train, W = t.train, rct = TRUE, seed = 1234),
+        arg_filter(rr_causal_forest, hp$rrcf)
+      )
+      forest.glm <- tryCatch(
+        suppressMessages(do.call(rr_causal_forest, rrcf_args)),
+        error = function(e) {
+          cat(sprintf("trial %d [RRCF]: %s\n", idx, e$message), file = log_con)
+          stop(e)
+        }
       )
       
       ## 3. predictions & metrics -------------------------------------
@@ -340,146 +478,195 @@ get_covariate_cols <- function(dt) {
   setdiff(names(dt), drop_cols)
 }
 
-power_from_bundle <- function(n,
-                              rho,
-                              link_type = c("log", "identity"),
-                              p_base    = NULL,
-                              alpha     = 0.05,
-                              out_dir   = "data") {
+load_bundle <- function(n, rho, link_type=c("log", "identity"), p_base=NULL) {
   
+  out_dir = "data"
   link_type <- match.arg(link_type)
   fname_base <- make_base_filename(n, rho, link_type, p_base)
   bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
   if (!file.exists(bundle_file))
     stop("Cannot find bundle file: ", bundle_file)
   
-  dt <- readRDS(bundle_file)
+  readRDS(bundle_file)
+}
+
+stable_log <- function(rr, cap_q = 0.995, cap_abs = 12) {
+  x <- log(rr)
+  x[!is.finite(x)] <- NA_real_
+  if (all(!is.finite(x))) return(x)
+  Lq <- stats::quantile(abs(x[is.finite(x)]), cap_q, na.rm = TRUE)
+  L  <- min(Lq, cap_abs)  # cap to, say, |log RR| <= 12 (~ e^12 ≈ 1.6e5)
+  pmax(pmin(x,  L), -L)
+}
+
+power_from_bundle <- function(n, rho, link_type = c("log","identity"),
+                              p_base = NULL, alpha = 0.05) {
+  dt <- load_bundle(n, rho, link_type, p_base)
   cov_cols <- get_covariate_cols(dt)
   
-  trial_ids <- unique(dt$trial_id)
-  p_grf <- numeric(length(trial_ids))
-  p_glm <- numeric(length(trial_ids))
+  tri <- unique(dt$trial_id)
+  p_grf <- rep(NA_real_, length(tri))
+  p_glm <- rep(NA_real_, length(tri))
   
-  for (i in seq_along(trial_ids)) {
-    sub <- dt[trial_id == trial_ids[i]]
+  ctrl <- glm.control(maxit = 100, epsilon = 1e-10)
+  
+  for (i in seq_along(tri)) {
+    sub <- dt[trial_id == tri[i]]
+    base_df <- data.frame(y = sub$Y, W = sub$A, sub[, ..cov_cols])
     
-    y.test <- sub$Y
-    t.test <- sub$A                     # <-- define it, as in run_trials()
+    ## ---- GRF path ----
+    lg <- stable_log(sub$crte_hat_grf)
+    mask <- is.finite(lg) & stats::complete.cases(base_df)
+    if (sum(mask) >= 5 && length(unique(sub$A[mask])) == 2) {
+      df <- cbind(base_df[mask, , drop = FALSE], log_crte_hat = lg[mask])
+      
+      # (optional) ensure a few positives in each arm to avoid separation
+      pos1 <- sum(df$y == 1 & df$W == 1)
+      pos0 <- sum(df$y == 1 & df$W == 0)
+      if (pos1 >= 5 && pos0 >= 5) {
+        base_g <- try(glm(y ~ . - log_crte_hat, family = poisson, data = df, control = ctrl), silent = TRUE)
+        if (!inherits(base_g, "try-error")) {
+          add_g  <- try(glm(y ~ . - log_crte_hat + I(W * log_crte_hat),
+                            family = poisson, data = df, control = ctrl,
+                            start = c(coef(base_g), 0)), silent = TRUE)
+          if (!inherits(add_g, "try-error")) {
+            dev_g <- anova(base_g, add_g)$Deviance
+            p_grf[i] <- 1 - pchisq(dev_g[2], df = 1)
+          }
+        }
+      }
+    }
     
-    anova_df <- data.frame(
-      y.test = y.test,
-      t.test = t.test,
-      sub[, ..cov_cols]
-    )
-    
-    base_mod <- glm(y.test ~ ., family = poisson, data = anova_df)
-    
-    add_grf <- glm(
-      y.test ~ .,
-      family = poisson,
-      data = cbind(anova_df,
-                   t.test * log(sub$crte_hat_grf))
-    )
-    add_glm <- glm(
-      y.test ~ .,
-      family = poisson,
-      data = cbind(anova_df,
-                   t.test * log(sub$crte_hat_glm))
-    )
-    
-    p_grf[i] <- 1 - pchisq(anova(base_mod, add_grf)$Deviance[2], 1)
-    p_glm[i] <- 1 - pchisq(anova(base_mod, add_glm)$Deviance[2], 1)
+    ## ---- RRCF path (mirror) ----
+    lgm <- stable_log(sub$crte_hat_glm)
+    maskm <- is.finite(lgm) & stats::complete.cases(base_df)
+    if (sum(maskm) >= 5 && length(unique(sub$A[maskm])) == 2) {
+      dfm <- cbind(base_df[maskm, , drop = FALSE], log_crte_hat = lgm[maskm])
+      pos1 <- sum(dfm$y == 1 & dfm$W == 1)
+      pos0 <- sum(dfm$y == 1 & dfm$W == 0)
+      if (pos1 >= 5 && pos0 >= 5) {
+        base_m <- try(glm(y ~ . - log_crte_hat, family = poisson, data = dfm, control = ctrl), silent = TRUE)
+        if (!inherits(base_m, "try-error")) {
+          add_m  <- try(glm(y ~ . - log_crte_hat + I(W * log_crte_hat),
+                            family = poisson, data = dfm, control = ctrl,
+                            start = c(coef(base_m), 0)), silent = TRUE)
+          if (!inherits(add_m, "try-error")) {
+            dev_m <- anova(base_m, add_m)$Deviance
+            p_glm[i] <- 1 - pchisq(dev_m[2], df = 1)
+          }
+        }
+      }
+    }
   }
   
-  setNames(c(mean(p_grf < alpha), mean(p_glm < alpha)),
+  setNames(c(mean(p_grf < alpha, na.rm = TRUE),
+             mean(p_glm < alpha, na.rm = TRUE)),
            c("power_grf", "power_glm"))
 }
+
+# mape_from_bundle <- function(n,
+#                              rho,
+#                              link_type = c("log", "identity"),
+#                              p_base    = NULL,
+#                              out_dir   = "data") {
+#   
+#   # link_type  <- match.arg(link_type)
+#   # fname_base <- make_base_filename(n, rho, link_type, p_base)
+#   # bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
+#   # 
+#   # if (!file.exists(bundle_file))
+#   #   stop("Cannot find bundle file: ", bundle_file)
+#   # 
+#   # ## ---- load test‑set bundle ----------------------------------------
+#   # dt <- readRDS(bundle_file)   # columns include CRTE, crte_hat_grf, crte_hat_glm, trial_id
+#   dt <- load_bundle(n, rho, link_type, p_base)
+#   
+#   ## ---- per‑trial MAPE ---------------------------------------------
+#   MAPE <- dt[, .(
+#     mape_grf = mean(abs((CRTE - crte_hat_grf) / CRTE)),
+#     mape_glm = mean(abs((CRTE - crte_hat_glm) / CRTE))
+#   ),
+#   by = trial_id
+#   ]
+#   
+#   ## ---- average over trials (matches mape_from_rds) ----------------
+#   mean_grf <- mean(MAPE$mape_grf)
+#   mean_glm <- mean(MAPE$mape_glm)
+#   
+#   setNames(c(mean_grf, mean_glm),
+#            c("mean_mape_grf", "mean_mape_glm"))
+# }
 
 mape_from_bundle <- function(n,
                              rho,
                              link_type = c("log", "identity"),
-                             p_base    = NULL,
-                             out_dir   = "data") {
+                             p_base    = NULL) {
+  dt <- load_bundle(n, rho, link_type, p_base)
   
-  link_type  <- match.arg(link_type)
-  fname_base <- make_base_filename(n, rho, link_type, p_base)
-  bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
+  per_trial <- dt[, {
+    num   <- abs(CRTE - crte_hat_grf) / CRTE
+    keepg <- is.finite(num)
+    num_m <- abs(CRTE - crte_hat_glm) / CRTE
+    keepm <- is.finite(num_m)
+    
+    .( mape_grf = if (sum(keepg) >= 10) mean(num[keepg]) else NA_real_,
+       mape_glm = if (sum(keepm) >= 10) mean(num_m[keepm]) else NA_real_ )
+  }, by = trial_id]
   
-  if (!file.exists(bundle_file))
-    stop("Cannot find bundle file: ", bundle_file)
-  
-  ## ---- load test‑set bundle ----------------------------------------
-  dt <- readRDS(bundle_file)   # columns include CRTE, crte_hat_grf, crte_hat_glm, trial_id
-  
-  ## ---- per‑trial MAPE ---------------------------------------------
-  MAPE <- dt[, .(
-    mape_grf = mean(abs((CRTE - crte_hat_grf) / CRTE)),
-    mape_glm = mean(abs((CRTE - crte_hat_glm) / CRTE))
-  ),
-  by = trial_id
-  ]
-  
-  ## ---- average over trials (matches mape_from_rds) ----------------
-  mean_grf <- mean(MAPE$mape_grf)
-  mean_glm <- mean(MAPE$mape_glm)
-  
-  setNames(c(mean_grf, mean_glm),
+  setNames(c(mean(per_trial$mape_grf, na.rm = TRUE),
+             mean(per_trial$mape_glm, na.rm = TRUE)),
            c("mean_mape_grf", "mean_mape_glm"))
 }
+
 
 power_rd_from_bundle <- function(n,
                                  rho,
                                  link_type = c("log", "identity"),
                                  p_base    = NULL,
-                                 alpha     = 0.05,
-                                 out_dir   = "data") {
-  
-  link_type <- match.arg(link_type)
-  fname_base <- make_base_filename(n, rho, link_type, p_base)
-  bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
-  if (!file.exists(bundle_file))
-    stop("Cannot find bundle file: ", bundle_file)
-  
-  ## ------------------ load bundle ------------------ ##
-  dt <- readRDS(bundle_file)
+                                 alpha     = 0.05) {
+  dt <- load_bundle(n, rho, link_type, p_base)
   cov_cols <- get_covariate_cols(dt)
   
   trial_ids <- unique(dt$trial_id)
-  p_grf <- numeric(length(trial_ids))
-  p_glm <- numeric(length(trial_ids))
+  p_grf <- rep(NA_real_, length(trial_ids))
+  p_glm <- rep(NA_real_, length(trial_ids))
+  
+  rd_pval <- function(base_df, tau_hat) {
+    mask <- is.finite(tau_hat) & stats::complete.cases(base_df)
+    if (sum(mask) < 10) return(NA_real_)
+    Wm <- base_df$W[mask]
+    tab <- table(Wm)
+    if (length(tab) < 2 || any(tab < 5)) return(NA_real_)  # need both arms, min 5 each
+    
+    tau_c <- tau_hat[mask] - mean(tau_hat[mask])
+    int   <- Wm * tau_c
+    if (sd(int) == 0) return(NA_real_)                     # no variation ⇒ no test
+    
+    df_b <- base_df[mask, , drop = FALSE]
+    df   <- cbind(df_b, int = int)
+    
+    base <- try(lm(y ~ ., data = df_b), silent = TRUE)
+    add  <- try(lm(y ~ . + int, data = df), silent = TRUE)
+    if (inherits(base, "try-error") || inherits(add, "try-error")) return(NA_real_)
+    
+    # If adding 'int' didn’t increase rank, ANOVA p-value is meaningless
+    if (ncol(model.matrix(add)) == ncol(model.matrix(base))) return(NA_real_)
+    
+    av <- anova(base, add)
+    p  <- suppressWarnings(av$`Pr(>F)`[2])
+    if (!is.finite(p)) NA_real_ else p
+  }
   
   for (i in seq_along(trial_ids)) {
     sub <- dt[trial_id == trial_ids[i]]
+    base_df <- data.frame(y = sub$Y, W = sub$A, sub[, ..cov_cols])
     
-    ## ---------- construct centred interaction term ----------
-    tau_bar_grf <- mean(sub$cate_hat_grf)
-    tau_bar_glm <- mean(sub$cate_hat_glm)
-    
-    int_grf <- sub$A * (sub$cate_hat_grf - tau_bar_grf)
-    int_glm <- sub$A * (sub$cate_hat_glm - tau_bar_glm)
-    
-    ## ---------- baseline model: Y ~ X + W -------------------
-    base_df <- data.frame(
-      y  = sub$Y,
-      W  = sub$A,
-      sub[, ..cov_cols]
-    )
-    base_mod <- lm(y ~ ., data = base_df)  # linear‑probability calibration
-    
-    ## ---------- augmented with GRF interaction --------------
-    add_grf <- lm(y ~ .,
-                  data = cbind(base_df, int_grf))
-    
-    ## ---------- augmented with GLM interaction --------------
-    add_glm <- lm(y ~ .,
-                  data = cbind(base_df, int_glm))
-    
-    ## ---------- 1‑df F‑tests --------------------------------
-    p_grf[i] <- anova(base_mod, add_grf)$`Pr(>F)`[2]
-    p_glm[i] <- anova(base_mod, add_glm)$`Pr(>F)`[2]
+    p_grf[i] <- rd_pval(base_df, sub$cate_hat_grf)
+    p_glm[i] <- rd_pval(base_df, sub$cate_hat_glm)
   }
   
-  setNames(c(mean(p_grf < alpha), mean(p_glm < alpha)),
+  setNames(c(mean(p_grf < alpha, na.rm = TRUE),
+             mean(p_glm < alpha, na.rm = TRUE)),
            c("power_grf", "power_glm"))
 }
 
