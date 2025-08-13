@@ -1,102 +1,137 @@
 library(causl)
 library(data.table)
 
-.EEXP_H_CONST <- 1.20332119584
-.LOW_BASELINE_THRESHOLD <- 0.02  # treat p_base <= 2% as "low baseline"
-.DEFAULT_PBASE_LOG <- .EEXP_H_CONST * exp(-2)  # ≈ 0.163
-.DEFAULT_PBASE_ID  <- 0.23
-.TARGET_TEST_EVENTS <- 40
-.TEST_FRAC_DEFAULT  <- 0.20
-.TEST_FRAC_CAP      <- 0.50
-.LOW_N_TRAIN_THRESHOLD <- 2000
+# .EEXP_H_CONST <- 1.20332119584
+# .LOW_BASELINE_THRESHOLD <- 0.02  # treat p_base <= 2% as "low baseline"
+# .DEFAULT_PBASE_LOG <- .EEXP_H_CONST * exp(-2)  # ≈ 0.163
+# .DEFAULT_PBASE_ID  <- 0.23
+# .TARGET_TEST_EVENTS <- 40
+# .TEST_FRAC_DEFAULT  <- 0.20
+# .TEST_FRAC_CAP      <- 0.50
+# #.LOW_N_TRAIN_THRESHOLD <- 2000
+# .LOW_N_TRAIN_THRESHOLD <- 999999
 
-choose_test_frac <- function(n,
-                             link_type,
-                             p_base,
-                             default = .TEST_FRAC_DEFAULT,
-                             target_events = .TARGET_TEST_EVENTS,
-                             cap = .TEST_FRAC_CAP,
-                             floor = 0.20) {
-  # effective baseline risk if user didn't override
-  p_eff <- if (is.null(p_base)) {
-    if (link_type == "log") .DEFAULT_PBASE_LOG else .DEFAULT_PBASE_ID
-  } else p_base
-  
-  # If default split already yields enough test events, keep it
-  exp_events_default <- n * default * p_eff
-  if (exp_events_default >= target_events) return(default)
-  
-  # Otherwise, enlarge split just enough (but not beyond cap)
-  tf <- target_events / (n * max(p_eff, 1e-9))
-  tf <- min(cap, max(floor, tf))
-  
-  if (tf > default + 1e-9) {
-    message(sprintf(
-      "auto test_frac=%.2f (target ~%d test events; p≈%.3f, n=%d)",
-      tf, target_events, p_eff, n
-    ))
-  }
-  tf
-}
-
-choose_forest_hparams <- function(link_type, p_base, num_trees, n_train) {
-  ultra_low <- (!is.null(p_base)) && (link_type == "log") && (p_base <= .LOW_BASELINE_THRESHOLD)
-  if (ultra_low) {
-    return(list(
-      grf  = list(num.trees = max(1000, num_trees),
-                  min.node.size = 40,
-                  sample.fraction = 0.95,
-                  ci.group.size = 1L),
-      rrcf = list(num.trees = max(1000, num_trees),
-                  min.node.size = 40,
-                  sample.fraction = 0.49)
-    ))
-  }
-  
-  # --- NEW: mild tweaks for small training sets (any link/baseline) ---
-  if (n_train <= .LOW_N_TRAIN_THRESHOLD) {
-    # scale leaf size with training size; keep sample.fraction default
-    leaf <- max(10L, as.integer(round(0.03 * n_train)))  # ~3% of train
-    return(list(
-      grf  = list(num.trees = max(500, num_trees),
-                  min.node.size = leaf),
-      rrcf = list(num.trees = max(500, num_trees),
-                  min.node.size = leaf)
-    ))
-  }
-  
-  # Default settings (covers n≥~2000 and 5% baseline case)
-  list(
-    grf  = list(num.trees = num_trees),
-    rrcf = list(num.trees = num_trees)
-  )
-}
-
-arg_filter <- function(fun, args) {
-  fn_args <- names(formals(fun))
-  args[names(args) %in% fn_args]
-}
-
-# # Pick a test split when baseline is ultra-low (≤ .LOW_BASELINE_THRESHOLD)
+# copula_rct_test <- function () {
+#   
+#   test_one <- function(n, rho, seed) {
+#     
+#     n = 100
+#     rho = 0.25
+#     seed = 432
+#     dat <- shirvaikar_copula_rct(n, rho, seed)
+#     dat2 <- copula_rct_log(n, rho, seed)
+#     dat2$CATE <- NULL
+#     isTRUE(all.equal(dat, dat2))
+#   } 
+#   
+#   all_passed = TRUE
+#   if (suppressMessages(!test_one(100,0.4,23))) {all_passed=FALSE; cat("test failed")}
+#   if (suppressMessages(!test_one(100,0.1,227))) {all_passed=FALSE; cat("test failed")}
+#   if (suppressMessages(!test_one(100,2.2,1132))) {all_passed=FALSE; cat("test failed")}
+#   if (all_passed) {cat("all dgp tests passed")}
+#   
+# }
+# 
+# 
 # choose_test_frac <- function(n,
 #                              link_type,
 #                              p_base,
-#                              default = 0.20,
-#                              target_events = 40,  # aim for ~40 test positives
-#                              cap = 0.50,
+#                              default = .TEST_FRAC_DEFAULT,
+#                              target_events = .TARGET_TEST_EVENTS,
+#                              cap = .TEST_FRAC_CAP,
 #                              floor = 0.20) {
-#   ultra_low <- (!is.null(p_base)) && (link_type == "log") && (p_base <= .LOW_BASELINE_THRESHOLD)
-#   if (!ultra_low) return(default)
+#   # effective baseline risk if user didn't override
+#   p_eff <- if (is.null(p_base)) {
+#     if (link_type == "log") .DEFAULT_PBASE_LOG else .DEFAULT_PBASE_ID
+#   } else p_base
 #   
-#   # Expected test events ≈ n * test_frac * p_base  ⇒  test_frac ≈ target/(n*p_base)
-#   tf <- target_events / (n * max(p_base, 1e-9))
+#   # If default split already yields enough test events, keep it
+#   exp_events_default <- n * default * p_eff
+#   if (exp_events_default >= target_events) return(default)
+#   
+#   # Otherwise, enlarge split just enough (but not beyond cap)
+#   tf <- target_events / (n * max(p_eff, 1e-9))
 #   tf <- min(cap, max(floor, tf))
 #   
 #   if (tf > default + 1e-9) {
-#     message(sprintf("auto test_frac=%.2f to target ~%d test events at p_base=%.3f",
-#                     tf, target_events, p_base))
+#     message(sprintf(
+#       "auto test_frac=%.2f (target ~%d test events; p≈%.3f, n=%d)",
+#       tf, target_events, p_eff, n
+#     ))
 #   }
 #   tf
+# }
+# 
+# choose_forest_hparams <- function(link_type, p_base, num_trees, n_train) {
+#   ultra_low <- (!is.null(p_base)) && (link_type == "log") && (p_base <= .LOW_BASELINE_THRESHOLD)
+#   if (ultra_low) {
+#     return(list(
+#       grf  = list(num.trees = max(1000, num_trees),
+#                   min.node.size = 40,
+#                   sample.fraction = 0.95,
+#                   ci.group.size = 1L),
+#       rrcf = list(num.trees = max(1000, num_trees),
+#                   min.node.size = 40,
+#                   sample.fraction = 0.49)
+#     ))
+#   }
+#   
+#   # --- NEW: mild tweaks for small training sets (any link/baseline) ---
+#   if (n_train <= .LOW_N_TRAIN_THRESHOLD) {
+#     # scale leaf size with training size; keep sample.fraction default
+#     leaf <- max(10L, as.integer(round(0.03 * n_train)))  # ~3% of train
+#     return(list(
+#       grf  = list(num.trees = max(500, num_trees),
+#                   min.node.size = leaf),
+#       rrcf = list(num.trees = max(500, num_trees),
+#                   min.node.size = leaf)
+#     ))
+#   }
+#   
+#   # Default settings (covers n≥~2000 and 5% baseline case)
+#   list(
+#     grf  = list(num.trees = num_trees),
+#     rrcf = list(num.trees = num_trees)
+#   )
+# }
+# 
+# arg_filter <- function(fun, args) {
+#   fn_args <- names(formals(fun))
+#   args[names(args) %in% fn_args]
+# }
+# 
+# shirvaikar_copula_rct <- function(n, rho = 0, seed = 111){
+#   fam <- list(c(1,3,4),c(5,5,5,1,2),c(5),c(1,3,4))  
+#   forms <- list(c(X1 ~ 1, X2 ~ X1, X3~ X1), 
+#                 list(A ~ 1, C1 ~ 1, C2 ~ C1, C3 ~ C1:C2, C4 ~ C1), 
+#                 Y ~ A + C1 + I(sin(C4)) + A:C1 + A:C2 + A:I(C3>0) + A:I(C4^2), 
+#                 ~ C2) 
+#   pars <- list(X1 = list(beta=0, phi=1),
+#                X2 = list(beta=c(0.1,0.2), phi=1), 
+#                X3 = list(beta=c(0.1,0.1), phi=1), 
+#                A = list(beta=c(0)), # treatment is completely randomized
+#                C1 = list(beta=c(0)),
+#                C2 = list(beta=c(-2,1)),
+#                C3 = list(beta=c(0,0.1), phi = 1),
+#                C4 = list(beta=c(0,0.1), phi=0.1, par2=20),
+#                Y = list(beta=c(-2, -0.2, 0.3, 0.4, -rho, -rho, rho, rho)), 
+#                cop = list(Y=list(X1=list(beta=c(0,0.5)),
+#                                  X2=list(beta=c(-0.5,0)),
+#                                  X3=list(beta=c(0.5,0))))) 
+#   link <- list(c("identity","log","logit"),
+#                c("logit","logit","logit","identity","identity"),
+#                "log")
+#   
+#   set.seed(seed)
+#   dat <- as.data.table(rfrugalParam(n, formulas=forms, pars=pars, 
+#                                     family=fam, link=link))
+#   
+#   # construct a model matrix and calculate the true CATE
+#   dat2 <- copy(dat)
+#   mm <- model.matrix(forms[[3]],dat2[,A:=1])-model.matrix(forms[[3]],dat2[,A:=0]) 
+#   dat$CRTE <- exp(mm %*% pars$Y$beta)
+#   #summary(mm %*% pars$Y$beta)
+#   return(dat)
 # }
 
 # ------------------------------------------------------------------------------
@@ -349,126 +384,189 @@ rd_predict <- function(object, newdata) {
   output
 }
 
-run_trials <- function(n,
-                       rho,
-                       trials,
-                       link_type = c("log", "identity"),
-                       p_base = NULL,
-                       num_trees = 200,
-                       test_frac = NULL) {
+make_and_save_bundle <- function(n, rho, link_type = c("log", "identity"), num_trials=100, p_base = NULL, num_trees = 500, test_frac = 0.2) {
   
-  ## ---  packages quietly --------------------------------------------
+  bundle <- my_make_bundle(n, rho, link_type, num_trials, p_base, num_trees, test_frac)
+  
+  out_dir <- "data"
+  fname_base <- make_base_filename(n, rho, link_type, p_base)
+  bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
+  saveRDS(bundle, file = bundle_file)
+}
+
+make_bundle <- function(n, rho, link_type = c("log", "identity"), num_trials=100, p_base = NULL, num_trees = 500, test_frac = 0.2) {
+  
   suppressMessages({
     library(causl);  library(data.table)
     library(grf);    library(rrcf)
     library(parallel)
   })
+  
   link_type <- match.arg(link_type)
-  
-  out_dir <- "data"; dir.create(out_dir, showWarnings = FALSE)
-  fname_base <- make_base_filename(n, rho, link_type, p_base)
-  
-  # after fname_base:
-  test_frac_eff <- if (is.null(test_frac)) choose_test_frac(n, link_type, p_base) else test_frac
-  n_train <- as.integer(round((1 - test_frac_eff) * n))  # optional: precompute once
-  
-  ## --- (A) open log file --------------------------------------------
-  log_file <- file.path(out_dir, paste0("log_", fname_base, ".txt"))
-  log_con  <- file(log_file, open = "wt")
-  on.exit(close(log_con), add = TRUE)
-  
-  ## --- helper --------------------------------------------------------
-  one_trial <- function(idx) {
-    tryCatch({
-      
-      ## 1. simulate ---------------------------------------------------
-      sim_fun  <- if (link_type == "log") copula_rct_log else copula_rct_identity
-      sim_args <- list(n = n, rho = rho, seed = idx)
-      if (!is.null(p_base)) sim_args$p_base <- p_base
-      dat <- suppressWarnings(do.call(sim_fun, sim_args))   # keep console quiet
-      
-      ## 2. split / fit -----------------------------------------------
-      # # decide test split
-      split <- sample.int(n, size = as.integer(round((1 - test_frac_eff) * n)))
-      x <- dat[, !c("A", "Y", "CRTE", "CATE"), with = FALSE]
-      x.train <- x[ split, ];  x.test <- x[-split, ]
-      y.train <- dat$Y[ split]; y.test <- dat$Y[-split]
-      t.train <- dat$A[ split]; t.test <- dat$A[-split]
-      crte.test <- dat$CRTE[-split]
 
-      # choose hparams
-      hp <- choose_forest_hparams(link_type, p_base, num_trees, n_train)
-      
-      # GRF
-      grf_args <- c(
-        list(X = x.train, Y = y.train, W = t.train, W.hat = 0.5, seed = 1234),
-        arg_filter(causal_forest, hp$grf)
-      )
-      forest.grf <- tryCatch(
-        suppressMessages(do.call(causal_forest, grf_args)),
-        error = function(e) {
-          cat(sprintf("trial %d [GRF]: %s\n", idx, e$message), file = log_con)
-          stop(e)
-        }
-      )
-      
-      # RRCF
-      rrcf_args <- c(
-        list(X = x.train, Y = y.train, W = t.train, rct = TRUE, seed = 1234),
-        arg_filter(rr_causal_forest, hp$rrcf)
-      )
-      forest.glm <- tryCatch(
-        suppressMessages(do.call(rr_causal_forest, rrcf_args)),
-        error = function(e) {
-          cat(sprintf("trial %d [RRCF]: %s\n", idx, e$message), file = log_con)
-          stop(e)
-        }
-      )
-      
-      ## 3. predictions & metrics -------------------------------------
-      rr_pred.grf <- rr_predict(forest.grf, x.test)
-      rr_pred.glm <- rr_predict(forest.glm, x.test)
-      
-      rd_pred.grf <- predict(forest.grf, x.test)$predictions
-      rd_pred.glm <- rd_predict(forest.glm, x.test)
- 
-      dat_test <- data.table::copy(dat[-split])                # only test rows
-      dat_test[, `:=`(
-        crte_hat_grf = rr_pred.grf,
-        crte_hat_glm = rr_pred.glm,
-        cate_hat_grf = rd_pred.grf,
-        cate_hat_glm = rd_pred.glm,
-        trial_id     = idx
-      )]
-      
-      list(dat = dat_test)
-    }, error = function(e) {
-      cat(sprintf("trial %d: %s\n", idx, e$message), file = log_con)
-      return(NULL)                 # skips this trial
-    })
+  one_trial <- function(idx) {
+
+    sim_fun  <- if (link_type == "log") copula_rct_log else copula_rct_identity
+    sim_args <- list(n = n, rho = rho, seed = idx)
+    if (!is.null(p_base)) sim_args$p_base <- p_base
+    dat <- suppressWarnings(do.call(sim_fun, sim_args))
+    
+    x <- dat[, !c("A", "Y", "CRTE", "CATE"), with = FALSE]
+    set.seed(idx)
+    split <- sample(seq_len(n), size = n*(1 - test_frac))
+    x.train <- x[ split, ];  x.test <- x[-split, ]
+    y.train <- dat$Y[ split]; y.test <- dat$Y[-split]
+    t.train <- dat$A[ split]; t.test <- dat$A[-split]
+    crte.test <- dat$CRTE[-split]
+    
+    forest.grf <- causal_forest(X = x.train, Y = y.train, W = t.train, W.hat = 0.5, seed = 1234, num.trees=500)
+    forest.glm = rr_causal_forest(x.train, y.train, t.train, rct=TRUE, seed=1234, num.trees=500)
+
+    rr_pred.grf <- rr_predict(forest.grf, x.test)
+    rr_pred.glm <- rr_predict(forest.glm, x.test)
+    rd_pred.grf <- predict(forest.grf, x.test)$predictions
+    rd_pred.glm <- rd_predict(forest.glm, x.test)
+    
+    dat_test <- data.table::copy(dat[-split])
+    dat_test[, `:=`(
+      crte_hat_grf = rr_pred.grf,
+      crte_hat_glm = rr_pred.glm,
+      cate_hat_grf = rd_pred.grf,
+      cate_hat_glm = rd_pred.glm,
+      trial_id     = idx
+    )]
   }
   
-  ## --- parallel execution -------------------------------------------
-  res_lst <- mclapply(seq_len(trials), one_trial,
-                      mc.cores = parallel::detectCores() - 1,
-                      mc.preschedule = FALSE)
-  
-  ## --- bind, removing NULLs -----------------------------------------
-  ok      <- vapply(res_lst, is.null, logical(1), USE.NAMES = FALSE)
-  good    <- res_lst[!ok]
-  
-  if (length(good) == 0) stop("All trials failed; see ", log_file)
-  
-  test_bundle <- data.table::rbindlist(lapply(good, `[[`, "dat"))
-  bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
-  saveRDS(test_bundle, file = bundle_file)
-  
-  if (file.size(log_file) == 0) unlink(log_file)   # delete empty log
-  else message("Finished with some errors. See ", log_file)
-  
-  invisible(NULL)
+  res_lst <- mclapply(seq_len(num_trials), one_trial, mc.cores = parallel::detectCores() - 1, mc.preschedule = FALSE)
+  bundle <- do.call(rbind, res_lst)
+  bundle
 }
 
+# create_bundle <- function(n,
+#                        rho,
+#                        trials,
+#                        link_type = c("log", "identity"),
+#                        p_base = NULL,
+#                        num_trees = 200,
+#                        test_frac = NULL) {
+#   
+#   ## ---  packages quietly --------------------------------------------
+#   suppressMessages({
+#     library(causl);  library(data.table)
+#     library(grf);    library(rrcf)
+#     library(parallel)
+#   })
+#   link_type <- match.arg(link_type)
+#   
+#   out_dir <- "data"; dir.create(out_dir, showWarnings = FALSE)
+#   fname_base <- make_base_filename(n, rho, link_type, p_base)
+#   
+#   # after fname_base:
+#   test_frac_eff <- if (is.null(test_frac)) choose_test_frac(n, link_type, p_base) else test_frac
+#   n_train <- as.integer(round((1 - test_frac_eff) * n))  # optional: precompute once
+#   
+#   ## --- (A) open log file --------------------------------------------
+#   log_file <- file.path(out_dir, paste0("log_", fname_base, ".txt"))
+#   log_con  <- file(log_file, open = "wt")
+#   on.exit(close(log_con), add = TRUE)
+#   
+#   ## --- helper --------------------------------------------------------
+#   one_trial <- function(idx) {
+#     tryCatch({
+#       
+#       ## 1. simulate ---------------------------------------------------
+#       sim_fun  <- if (link_type == "log") copula_rct_log else copula_rct_identity
+#       sim_args <- list(n = n, rho = rho, seed = idx)
+#       if (!is.null(p_base)) sim_args$p_base <- p_base
+#       dat <- suppressWarnings(do.call(sim_fun, sim_args))   # keep console quiet
+#       
+#       ## 2. split / fit -----------------------------------------------
+#       # # decide test split
+#       x <- dat[, !c("A", "Y", "CRTE", "CATE"), with = FALSE]
+#       set.seed(idx)
+#       split <- sample(seq_len(n), size = n*(1 - test_frac_eff))
+#       #split <- sample.int(n, size = as.integer(round((1 - test_frac_eff) * n)))
+#       x.train <- x[ split, ];  x.test <- x[-split, ]
+#       y.train <- dat$Y[ split]; y.test <- dat$Y[-split]
+#       t.train <- dat$A[ split]; t.test <- dat$A[-split]
+#       crte.test <- dat$CRTE[-split]
+#       
+#       forest.grf <- causal_forest(X = x.train, Y = y.train, W = t.train, W.hat = 0.5, seed = 1234, num.trees=500)
+#       forest.glm = rr_causal_forest(x.train, y.train, t.train, rct=TRUE, seed=1234, num.trees=500)
+# 
+#       # # choose hparams
+#       # hp <- choose_forest_hparams(link_type, p_base, num_trees, n_train)
+#       # 
+#       # # GRF
+#       # grf_args <- c(
+#       #   list(X = x.train, Y = y.train, W = t.train, W.hat = 0.5, seed = 1234),
+#       #   arg_filter(causal_forest, hp$grf)
+#       # )
+#       # forest.grf <- tryCatch(
+#       #   suppressMessages(do.call(causal_forest, grf_args)),
+#       #   error = function(e) {
+#       #     cat(sprintf("trial %d [GRF]: %s\n", idx, e$message), file = log_con)
+#       #     stop(e)
+#       #   }
+#       # )
+#       # 
+#       # # RRCF
+#       # rrcf_args <- c(
+#       #   list(X = x.train, Y = y.train, W = t.train, rct = TRUE, seed = 1234),
+#       #   arg_filter(rr_causal_forest, hp$rrcf)
+#       # )
+#       # forest.glm <- tryCatch(
+#       #   suppressMessages(do.call(rr_causal_forest, rrcf_args)),
+#       #   error = function(e) {
+#       #     cat(sprintf("trial %d [RRCF]: %s\n", idx, e$message), file = log_con)
+#       #     stop(e)
+#       #   }
+#       # )
+#       
+#       ## 3. predictions & metrics -------------------------------------
+#       rr_pred.grf <- rr_predict(forest.grf, x.test)
+#       rr_pred.glm <- rr_predict(forest.glm, x.test)
+#       
+#       rd_pred.grf <- predict(forest.grf, x.test)$predictions
+#       rd_pred.glm <- rd_predict(forest.glm, x.test)
+#  
+#       dat_test <- data.table::copy(dat[-split])                # only test rows
+#       dat_test[, `:=`(
+#         crte_hat_grf = rr_pred.grf,
+#         crte_hat_glm = rr_pred.glm,
+#         cate_hat_grf = rd_pred.grf,
+#         cate_hat_glm = rd_pred.glm,
+#         trial_id     = idx
+#       )]
+#       
+#       list(dat = dat_test)
+#     }, error = function(e) {
+#       cat(sprintf("trial %d: %s\n", idx, e$message), file = log_con)
+#       return(NULL)                 # skips this trial
+#     })
+#   }
+#   
+#   ## --- parallel execution -------------------------------------------
+#   res_lst <- mclapply(seq_len(trials), one_trial,
+#                       mc.cores = parallel::detectCores() - 1,
+#                       mc.preschedule = FALSE)
+#   
+#   ## --- bind, removing NULLs -----------------------------------------
+#   is_null      <- vapply(res_lst, is.null, logical(1), USE.NAMES = FALSE)
+#   good    <- res_lst[!is_null]
+#   
+#   if (length(good) == 0) stop("All trials failed; see ", log_file)
+#   
+#   test_bundle <- data.table::rbindlist(lapply(good, `[[`, "dat"))
+#   bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
+#   saveRDS(test_bundle, file = bundle_file)
+#   
+#   if (file.size(log_file) == 0) unlink(log_file)   # delete empty log
+#   else message("Finished with some errors. See ", log_file)
+#   
+#   invisible(NULL)
+# }
+# 
 get_covariate_cols <- function(dt) {
   drop_cols <- c("Y", "A",
                  "CRTE", "CATE",
@@ -477,146 +575,166 @@ get_covariate_cols <- function(dt) {
                  "trial_id")
   setdiff(names(dt), drop_cols)
 }
+# 
+# load_bundle <- function(n, rho, link_type=c("log", "identity"), p_base=NULL) {
+#   
+#   out_dir = "data"
+#   link_type <- match.arg(link_type)
+#   fname_base <- make_base_filename(n, rho, link_type, p_base)
+#   bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
+#   if (!file.exists(bundle_file))
+#     stop("Cannot find bundle file: ", bundle_file)
+#   
+#   readRDS(bundle_file)
+# }
 
-load_bundle <- function(n, rho, link_type=c("log", "identity"), p_base=NULL) {
+# stable_log <- function(rr, cap_q = 0.995, cap_abs = 12) {
+#   x <- log(rr)
+#   x[!is.finite(x)] <- NA_real_
+#   if (all(!is.finite(x))) return(x)
+#   Lq <- stats::quantile(abs(x[is.finite(x)]), cap_q, na.rm = TRUE)
+#   L  <- min(Lq, cap_abs)  # cap to, say, |log RR| <= 12 (~ e^12 ≈ 1.6e5)
+#   pmax(pmin(x,  L), -L)
+# }
+
+poisson_omnibus_pval <- function(pred, y.test, t.test, x.test) {
   
-  out_dir = "data"
+  anova.data = data.frame(cbind(y.test, t.test, x.test))
+  model.base = glm(y.test ~ ., family = poisson, data = anova.data)
+  model.hte = glm(y.test ~ ., family = poisson, data = cbind(anova.data, t.test*log(pred)))
+  anova.grf = anova(model.base, model.hte)
+  return(1 - pchisq(anova.grf$Deviance[2], df = 1))
+}
+
+power_from_file <- function(n, rho, link_type = c("log","identity"), p_base = NULL, forest_type = c("grf", "rrcf")) {
+  
   link_type <- match.arg(link_type)
-  fname_base <- make_base_filename(n, rho, link_type, p_base)
-  bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
-  if (!file.exists(bundle_file))
-    stop("Cannot find bundle file: ", bundle_file)
+  forest_type <- match.arg(forest_type)
+  bundle <- load_bundle(n, rho, link_type, p_base)
+  my_power_from_bundle(bundle, forest_type)
   
-  readRDS(bundle_file)
 }
 
-stable_log <- function(rr, cap_q = 0.995, cap_abs = 12) {
-  x <- log(rr)
-  x[!is.finite(x)] <- NA_real_
-  if (all(!is.finite(x))) return(x)
-  Lq <- stats::quantile(abs(x[is.finite(x)]), cap_q, na.rm = TRUE)
-  L  <- min(Lq, cap_abs)  # cap to, say, |log RR| <= 12 (~ e^12 ≈ 1.6e5)
-  pmax(pmin(x,  L), -L)
-}
+power_from_bundle <- function(bundle, forest_type = c("grf", "rrcf")) {
 
-power_from_bundle <- function(n, rho, link_type = c("log","identity"),
-                              p_base = NULL, alpha = 0.05) {
-  dt <- load_bundle(n, rho, link_type, p_base)
-  cov_cols <- get_covariate_cols(dt)
+  forest_type <- match.arg(forest_type)
+  cov_cols <- get_covariate_cols(bundle)
+  trials <- unique(bundle$trial_id)
   
-  tri <- unique(dt$trial_id)
-  p_grf <- rep(NA_real_, length(tri))
-  p_glm <- rep(NA_real_, length(tri))
-  
-  ctrl <- glm.control(maxit = 100, epsilon = 1e-10)
-  
-  for (i in seq_along(tri)) {
-    sub <- dt[trial_id == tri[i]]
-    base_df <- data.frame(y = sub$Y, W = sub$A, sub[, ..cov_cols])
-    
-    ## ---- GRF path ----
-    lg <- stable_log(sub$crte_hat_grf)
-    mask <- is.finite(lg) & stats::complete.cases(base_df)
-    if (sum(mask) >= 5 && length(unique(sub$A[mask])) == 2) {
-      df <- cbind(base_df[mask, , drop = FALSE], log_crte_hat = lg[mask])
-      
-      # (optional) ensure a few positives in each arm to avoid separation
-      pos1 <- sum(df$y == 1 & df$W == 1)
-      pos0 <- sum(df$y == 1 & df$W == 0)
-      if (pos1 >= 5 && pos0 >= 5) {
-        base_g <- try(glm(y ~ . - log_crte_hat, family = poisson, data = df, control = ctrl), silent = TRUE)
-        if (!inherits(base_g, "try-error")) {
-          add_g  <- try(glm(y ~ . - log_crte_hat + I(W * log_crte_hat),
-                            family = poisson, data = df, control = ctrl,
-                            start = c(coef(base_g), 0)), silent = TRUE)
-          if (!inherits(add_g, "try-error")) {
-            dev_g <- anova(base_g, add_g)$Deviance
-            p_grf[i] <- 1 - pchisq(dev_g[2], df = 1)
-          }
-        }
-      }
-    }
-    
-    ## ---- RRCF path (mirror) ----
-    lgm <- stable_log(sub$crte_hat_glm)
-    maskm <- is.finite(lgm) & stats::complete.cases(base_df)
-    if (sum(maskm) >= 5 && length(unique(sub$A[maskm])) == 2) {
-      dfm <- cbind(base_df[maskm, , drop = FALSE], log_crte_hat = lgm[maskm])
-      pos1 <- sum(dfm$y == 1 & dfm$W == 1)
-      pos0 <- sum(dfm$y == 1 & dfm$W == 0)
-      if (pos1 >= 5 && pos0 >= 5) {
-        base_m <- try(glm(y ~ . - log_crte_hat, family = poisson, data = dfm, control = ctrl), silent = TRUE)
-        if (!inherits(base_m, "try-error")) {
-          add_m  <- try(glm(y ~ . - log_crte_hat + I(W * log_crte_hat),
-                            family = poisson, data = dfm, control = ctrl,
-                            start = c(coef(base_m), 0)), silent = TRUE)
-          if (!inherits(add_m, "try-error")) {
-            dev_m <- anova(base_m, add_m)$Deviance
-            p_glm[i] <- 1 - pchisq(dev_m[2], df = 1)
-          }
-        }
-      }
-    }
+  get_pvals <- function(trial) {
+    dt = bundle[bundle$trial_id == trial]
+    x.test <- dt[, cov_cols, with = FALSE]
+    pred <- if (forest_type == "grf") dt$crte_hat_grf else dt$crte_hat_glm
+    poisson_omnibus_pval(pred, dt$Y, dt$A, x.test)
   }
-  
-  setNames(c(mean(p_grf < alpha, na.rm = TRUE),
-             mean(p_glm < alpha, na.rm = TRUE)),
-           c("power_grf", "power_glm"))
+  pvals <- vapply(trials, FUN=get_pvals, FUN.VALUE=numeric(1))
+  mean(pvals < 0.05)
 }
+
+mape_from_file <- function(n, rho, link_type = c("log","identity"), p_base = NULL, forest_type = c("grf", "rrcf"), trial = NULL) {
+  
+  link_type <- match.arg(link_type)
+  forest_type <- match.arg(forest_type)
+  bundle <- load_bundle(n, rho, link_type, p_base)
+  my_mape_from_bundle(bundle, forest_type, trial)
+  
+}
+
+mape_from_bundle <- function(bundle, forest_type = c("grf", "rrcf"), trial = NULL) {
+  
+  data <- bundle
+  if (!is.null(trial)) 
+    bundle <- bundle[bundle$trial_id == trial,]
+  
+  pred <- if (forest_type == "grf") bundle$crte_hat_grf else bundle$crte_hat_glm
+  mean(abs((bundle$CRTE - pred)/bundle$CRTE))
+}
+
+# power_from_bundle <- function(n, rho, link_type = c("log","identity"),
+#                               p_base = NULL, alpha = 0.05) {
+#   dt <- load_bundle(n, rho, link_type, p_base)
+#   cov_cols <- get_covariate_cols(dt)
+#   
+#   tri <- unique(dt$trial_id)
+#   p_grf <- rep(NA_real_, length(tri))
+#   p_glm <- rep(NA_real_, length(tri))
+#   
+#   ctrl <- glm.control(maxit = 100, epsilon = 1e-10)
+#   
+#   for (i in seq_along(tri)) {
+#     sub <- dt[trial_id == tri[i]]
+#     base_df <- data.frame(y = sub$Y, W = sub$A, sub[, ..cov_cols])
+#     
+#     ## ---- GRF path ----
+#     lg <- stable_log(sub$crte_hat_grf)
+#     mask <- is.finite(lg) & stats::complete.cases(base_df)
+#     if (sum(mask) >= 5 && length(unique(sub$A[mask])) == 2) {
+#       df <- cbind(base_df[mask, , drop = FALSE], log_crte_hat = lg[mask])
+#       
+#       # (optional) ensure a few positives in each arm to avoid separation
+#       pos1 <- sum(df$y == 1 & df$W == 1)
+#       pos0 <- sum(df$y == 1 & df$W == 0)
+#       if (pos1 >= 5 && pos0 >= 5) {
+#         base_g <- try(glm(y ~ . - log_crte_hat, family = poisson, data = df, control = ctrl), silent = TRUE)
+#         if (!inherits(base_g, "try-error")) {
+#           add_g  <- try(glm(y ~ . - log_crte_hat + I(W * log_crte_hat),
+#                             family = poisson, data = df, control = ctrl,
+#                             start = c(coef(base_g), 0)), silent = TRUE)
+#           if (!inherits(add_g, "try-error")) {
+#             dev_g <- anova(base_g, add_g)$Deviance
+#             p_grf[i] <- 1 - pchisq(dev_g[2], df = 1)
+#           }
+#         }
+#       }
+#     }
+#     
+#     ## ---- RRCF path (mirror) ----
+#     lgm <- stable_log(sub$crte_hat_glm)
+#     maskm <- is.finite(lgm) & stats::complete.cases(base_df)
+#     if (sum(maskm) >= 5 && length(unique(sub$A[maskm])) == 2) {
+#       dfm <- cbind(base_df[maskm, , drop = FALSE], log_crte_hat = lgm[maskm])
+#       pos1 <- sum(dfm$y == 1 & dfm$W == 1)
+#       pos0 <- sum(dfm$y == 1 & dfm$W == 0)
+#       if (pos1 >= 5 && pos0 >= 5) {
+#         base_m <- try(glm(y ~ . - log_crte_hat, family = poisson, data = dfm, control = ctrl), silent = TRUE)
+#         if (!inherits(base_m, "try-error")) {
+#           add_m  <- try(glm(y ~ . - log_crte_hat + I(W * log_crte_hat),
+#                             family = poisson, data = dfm, control = ctrl,
+#                             start = c(coef(base_m), 0)), silent = TRUE)
+#           if (!inherits(add_m, "try-error")) {
+#             dev_m <- anova(base_m, add_m)$Deviance
+#             p_glm[i] <- 1 - pchisq(dev_m[2], df = 1)
+#           }
+#         }
+#       }
+#     }
+#   }
+#   
+#   setNames(c(mean(p_grf < alpha, na.rm = TRUE),
+#              mean(p_glm < alpha, na.rm = TRUE)),
+#            c("power_grf", "power_glm"))
+# }
 
 # mape_from_bundle <- function(n,
 #                              rho,
 #                              link_type = c("log", "identity"),
-#                              p_base    = NULL,
-#                              out_dir   = "data") {
-#   
-#   # link_type  <- match.arg(link_type)
-#   # fname_base <- make_base_filename(n, rho, link_type, p_base)
-#   # bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
-#   # 
-#   # if (!file.exists(bundle_file))
-#   #   stop("Cannot find bundle file: ", bundle_file)
-#   # 
-#   # ## ---- load test‑set bundle ----------------------------------------
-#   # dt <- readRDS(bundle_file)   # columns include CRTE, crte_hat_grf, crte_hat_glm, trial_id
+#                              p_base    = NULL) {
 #   dt <- load_bundle(n, rho, link_type, p_base)
 #   
-#   ## ---- per‑trial MAPE ---------------------------------------------
-#   MAPE <- dt[, .(
-#     mape_grf = mean(abs((CRTE - crte_hat_grf) / CRTE)),
-#     mape_glm = mean(abs((CRTE - crte_hat_glm) / CRTE))
-#   ),
-#   by = trial_id
-#   ]
+#   per_trial <- dt[, {
+#     num   <- abs(CRTE - crte_hat_grf) / CRTE
+#     keepg <- is.finite(num)
+#     num_m <- abs(CRTE - crte_hat_glm) / CRTE
+#     keepm <- is.finite(num_m)
+#     
+#     .( mape_grf = if (sum(keepg) >= 10) mean(num[keepg]) else NA_real_,
+#        mape_glm = if (sum(keepm) >= 10) mean(num_m[keepm]) else NA_real_ )
+#   }, by = trial_id]
 #   
-#   ## ---- average over trials (matches mape_from_rds) ----------------
-#   mean_grf <- mean(MAPE$mape_grf)
-#   mean_glm <- mean(MAPE$mape_glm)
-#   
-#   setNames(c(mean_grf, mean_glm),
+#   setNames(c(mean(per_trial$mape_grf, na.rm = TRUE),
+#              mean(per_trial$mape_glm, na.rm = TRUE)),
 #            c("mean_mape_grf", "mean_mape_glm"))
 # }
-
-mape_from_bundle <- function(n,
-                             rho,
-                             link_type = c("log", "identity"),
-                             p_base    = NULL) {
-  dt <- load_bundle(n, rho, link_type, p_base)
-  
-  per_trial <- dt[, {
-    num   <- abs(CRTE - crte_hat_grf) / CRTE
-    keepg <- is.finite(num)
-    num_m <- abs(CRTE - crte_hat_glm) / CRTE
-    keepm <- is.finite(num_m)
-    
-    .( mape_grf = if (sum(keepg) >= 10) mean(num[keepg]) else NA_real_,
-       mape_glm = if (sum(keepm) >= 10) mean(num_m[keepm]) else NA_real_ )
-  }, by = trial_id]
-  
-  setNames(c(mean(per_trial$mape_grf, na.rm = TRUE),
-             mean(per_trial$mape_glm, na.rm = TRUE)),
-           c("mean_mape_grf", "mean_mape_glm"))
-}
 
 
 power_rd_from_bundle <- function(n,
@@ -670,62 +788,62 @@ power_rd_from_bundle <- function(n,
            c("power_grf", "power_glm"))
 }
 
-# ------------------------------------------------------------
-# Run a grid of (n, ρ) settings for a fixed link_type & p_base
-# ------------------------------------------------------------
-run_trials_grid <- function(n_values,
-                            rho_values,
-                            link_type = c("log", "identity"),
-                            p_base    = NULL,
-                            trials    = 100,
-                            num_trees = 200,
-                            out_dir   = "data") {
-  
-  # example usage:
-  #
-  # run_trials_grid(
-  #   n_values  = c(2500, 5000, 7500, 10000),
-  #   rho_values = c(0.00, 0.25, 0.50, 0.75),
-  #   link_type  = "log",
-  #   p_base     = NULL   # default baseline
-  # )
-  
-  link_type <- match.arg(link_type)          # validate input
-  dir.create(out_dir, showWarnings = FALSE)  # ensure folder exists
-  
-  status <- list()                           # bookkeeping
-  
-  for (n   in n_values) {
-    for (rho in rho_values) {
-      
-      # ---- does bundle already exist? ----------------------
-      fname_base  <- make_base_filename(n, rho, link_type, p_base)
-      bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
-      
-      if (file.exists(bundle_file)) {
-        message(sprintf("SKIP  n=%d rho=%.2f (%s) — bundle exists",
-                        n, rho, fname_base))
-        status[[fname_base]] <- "skipped"
-        next
-      }
-      
-      # ---- run simulations + forests -----------------------
-      message(sprintf("RUN   n=%d rho=%.2f (%s)", n, rho, fname_base))
-      tryCatch({
-        run_trials(n        = n,
-                   rho      = rho,
-                   trials   = trials,
-                   link_type = link_type,
-                   p_base   = p_base,
-                   num_trees = num_trees)
-        status[[fname_base]] <- "completed"
-      }, error = function(e) {
-        warning(sprintf("FAILED n=%d rho=%.2f : %s", n, rho, e$message))
-        status[[fname_base]] <- paste("failed:", e$message)
-      })
-    }
-  }
-  
-  invisible(status)   # return a named list of outcomes
-}
+# # ------------------------------------------------------------
+# # Run a grid of (n, ρ) settings for a fixed link_type & p_base
+# # ------------------------------------------------------------
+# run_trials_grid <- function(n_values,
+#                             rho_values,
+#                             link_type = c("log", "identity"),
+#                             p_base    = NULL,
+#                             trials    = 100,
+#                             num_trees = 200,
+#                             out_dir   = "data") {
+#   
+#   # example usage:
+#   #
+#   # run_trials_grid(
+#   #   n_values  = c(2500, 5000, 7500, 10000),
+#   #   rho_values = c(0.00, 0.25, 0.50, 0.75),
+#   #   link_type  = "log",
+#   #   p_base     = NULL   # default baseline
+#   # )
+#   
+#   link_type <- match.arg(link_type)          # validate input
+#   dir.create(out_dir, showWarnings = FALSE)  # ensure folder exists
+#   
+#   status <- list()                           # bookkeeping
+#   
+#   for (n   in n_values) {
+#     for (rho in rho_values) {
+#       
+#       # ---- does bundle already exist? ----------------------
+#       fname_base  <- make_base_filename(n, rho, link_type, p_base)
+#       bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
+#       
+#       if (file.exists(bundle_file)) {
+#         message(sprintf("SKIP  n=%d rho=%.2f (%s) — bundle exists",
+#                         n, rho, fname_base))
+#         status[[fname_base]] <- "skipped"
+#         next
+#       }
+#       
+#       # ---- run simulations + forests -----------------------
+#       message(sprintf("RUN   n=%d rho=%.2f (%s)", n, rho, fname_base))
+#       tryCatch({
+#         run_trials(n        = n,
+#                    rho      = rho,
+#                    trials   = trials,
+#                    link_type = link_type,
+#                    p_base   = p_base,
+#                    num_trees = num_trees)
+#         status[[fname_base]] <- "completed"
+#       }, error = function(e) {
+#         warning(sprintf("FAILED n=%d rho=%.2f : %s", n, rho, e$message))
+#         status[[fname_base]] <- paste("failed:", e$message)
+#       })
+#     }
+#   }
+#   
+#   invisible(status)   # return a named list of outcomes
+# }
 
