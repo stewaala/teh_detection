@@ -1,12 +1,18 @@
+library(causl)
+library(data.table)
+library(sandwich)
+library(lmtest)
+library(brglm2)
+library(grf)
+library(rrcf)
+library(parallel)
+
 # ------------------------------------------------------------------------------
 # The following function replicates the functionality of copula_rct() in 
 # Shirvaikar's github, but it takes an additional p_base parameter that
 # allows the user the specify the level of the expected untreated risk
 # ------------------------------------------------------------------------------
 copula_rct_log <- function(n, rho = 0, seed = 111, p_base = .EEXP_H_CONST * exp(-2)){
-  
-  library(causl)
-  library(data.table)
   
   alpha <- log(p_base) - log(.EEXP_H_CONST)
   #message("alpha set to ", alpha, '\n')
@@ -225,7 +231,7 @@ rd_predict <- function(object, newdata) {
   X <- object[["X.orig"]]
   Y <- object[["Y.orig"]]
   W <- object[["W.orig"]]
-
+  
   length = dim(newdata)[1]
   output = numeric(length)
   for(i in 1:length){
@@ -238,23 +244,21 @@ rd_predict <- function(object, newdata) {
   output
 }
 
-make_and_save_bundle <- function(n, rho, link_type = c("log", "identity"), num_trials=100, p_base = NULL, num_trees = 500, test_frac = 0.2) {
-  
-  bundle <- my_make_bundle(n, rho, link_type, num_trials, p_base, num_trees, test_frac)
-  
+make_and_save_bundle <- function(n, rho, link_type = c("log", "identity"), num_trials=100, p_base = NULL, num_trees = 500, test_frac = 0.2, skip_if_file_exists=TRUE) {
+
   out_dir <- "data"
   fname_base <- make_base_filename(n, rho, link_type, p_base)
   bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
+
+  if (file.exists(bundle_file) && skip_if_file_exists) {
+    return()
+  }
+  bundle <- make_bundle(n, rho, link_type, num_trials, p_base, num_trees, test_frac)
   saveRDS(bundle, file = bundle_file)
+  
 }
 
 make_bundle <- function(n, rho, link_type = c("log", "identity"), num_trials=100, p_base = NULL, num_trees = 500, test_frac = 0.2) {
-  
-  suppressMessages({
-    library(causl);  library(data.table)
-    library(grf);    library(rrcf)
-    library(parallel)
-  })
   
   link_type <- match.arg(link_type)
 
@@ -273,11 +277,12 @@ make_bundle <- function(n, rho, link_type = c("log", "identity"), num_trials=100
     t.train <- dat$A[ split]; t.test <- dat$A[-split]
     crte.test <- dat$CRTE[-split]
     
-    forest.grf <- causal_forest(X = x.train, Y = y.train, W = t.train, W.hat = 0.5, seed = 1234, num.trees=500)
-    forest.glm = rr_causal_forest(x.train, y.train, t.train, rct=TRUE, seed=1234, num.trees=500)
-
+    forest.grf <- causal_forest(X = x.train, Y = y.train, W = t.train, W.hat = 0.5, seed = 1234, num.trees=num_trees)
+    forest.glm = rr_causal_forest(x.train, y.train, t.train, rct=TRUE, seed=1234, num.trees=num_trees)
+    
     rr_pred.grf <- rr_predict(forest.grf, x.test)
     rr_pred.glm <- rr_predict(forest.glm, x.test)
+    
     rd_pred.grf <- predict(forest.grf, x.test)$predictions
     rd_pred.glm <- rd_predict(forest.glm, x.test)
     
@@ -317,47 +322,42 @@ load_bundle <- function(n, rho, link_type=c("log", "identity"), p_base=NULL) {
   readRDS(bundle_file)
 }
 
-poisson_omnibus_pval <- function(pred, y.test, t.test, x.test) {
+poisson_omnibus_pval <- function(pred, y.test, t.test, x.test, small_sample=FALSE) {
   
   anova.data = data.frame(cbind(y.test, t.test, x.test))
-  model.base = glm(y.test ~ ., family = poisson, data = anova.data)
-  model.hte = glm(y.test ~ ., family = poisson, data = cbind(anova.data, t.test*log(pred)))
-  anova.grf = anova(model.base, model.hte)
-  return(1 - pchisq(anova.grf$Deviance[2], df = 1))
+  
+  if (small_sample) {
+    if (length(unique(pred)) == 1) {
+      pval <- 1
+    } else {
+      dt <- cbind(anova.data, t_log_pred = t.test*log(pred.grf))
+      ctrl <- brglm2::brglm_control(maxit = 2000, epsilon = 1e-10, slowit = 1)
+      fit  <- glm(y.test ~ ., family = poisson(link="log"), data = dt, method = "brglmFit", control = ctrl)
+      pval <- coeftest(fit, vcov = vcovHC(fit, type = "HC3"))["t_log_pred", "Pr(>|z|)"]
+    }
+  } else {
+    model.base = glm(y.test ~ ., family = poisson, data = anova.data)
+    model.hte = glm(y.test ~ ., family = poisson, data = cbind(anova.data, t.test*log(pred)))
+    anova.grf = anova(model.base, model.hte)
+    pval = 1 - pchisq(anova.grf$Deviance[2], df = 1)
+  }
+  return(pval)
 }
 
-power_from_file <- function(n, rho, link_type = c("log","identity"), p_base = NULL, forest_type = c("grf", "rrcf")) {
-  
-  link_type <- match.arg(link_type)
-  forest_type <- match.arg(forest_type)
-  bundle <- load_bundle(n, rho, link_type, p_base)
-  my_power_from_bundle(bundle, forest_type)
-  
-}
-
-power_from_bundle <- function(bundle, forest_type = c("grf", "rrcf")) {
+poisson_power_from_bundle <- function(bundle, forest_type = c("grf", "rrcf"), small_sample=FALSE) {
 
   forest_type <- match.arg(forest_type)
   cov_cols <- get_covariate_cols(bundle)
   trials <- unique(bundle$trial_id)
   
-  get_pvals <- function(trial) {
+  get_pval <- function(trial) {
     dt = bundle[bundle$trial_id == trial]
     x.test <- dt[, cov_cols, with = FALSE]
     pred <- if (forest_type == "grf") dt$crte_hat_grf else dt$crte_hat_glm
-    poisson_omnibus_pval(pred, dt$Y, dt$A, x.test)
+    poisson_omnibus_pval(pred, dt$Y, dt$A, x.test, small_sample)
   }
-  pvals <- vapply(trials, FUN=get_pvals, FUN.VALUE=numeric(1))
+  pvals <- vapply(trials, FUN=get_pval, FUN.VALUE=numeric(1))
   mean(pvals < 0.05)
-}
-
-mape_from_file <- function(n, rho, link_type = c("log","identity"), p_base = NULL, forest_type = c("grf", "rrcf"), trial = NULL) {
-  
-  link_type <- match.arg(link_type)
-  forest_type <- match.arg(forest_type)
-  bundle <- load_bundle(n, rho, link_type, p_base)
-  my_mape_from_bundle(bundle, forest_type, trial)
-  
 }
 
 mape_from_bundle <- function(bundle, forest_type = c("grf", "rrcf"), trial = NULL) {
