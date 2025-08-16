@@ -7,6 +7,9 @@ library(grf)
 library(rrcf)
 library(parallel)
 
+
+.EEXP_H_CONST <- 1.20332119584
+
 # ------------------------------------------------------------------------------
 # The following function replicates the functionality of copula_rct() in 
 # Shirvaikar's github, but it takes an additional p_base parameter that
@@ -330,7 +333,7 @@ poisson_omnibus_pval <- function(pred, y.test, t.test, x.test, small_sample=FALS
     if (length(unique(pred)) == 1) {
       pval <- 1
     } else {
-      dt <- cbind(anova.data, t_log_pred = t.test*log(pred.grf))
+      dt <- cbind(anova.data, t_log_pred = t.test*log(pred))
       ctrl <- brglm2::brglm_control(maxit = 2000, epsilon = 1e-10, slowit = 1)
       fit  <- glm(y.test ~ ., family = poisson(link="log"), data = dt, method = "brglmFit", control = ctrl)
       pval <- coeftest(fit, vcov = vcovHC(fit, type = "HC3"))["t_log_pred", "Pr(>|z|)"]
@@ -344,28 +347,412 @@ poisson_omnibus_pval <- function(pred, y.test, t.test, x.test, small_sample=FALS
   return(pval)
 }
 
-poisson_power_from_bundle <- function(bundle, forest_type = c("grf", "rrcf"), small_sample=FALSE) {
-
+# poisson_power_from_bundle <- function(bundle, forest_type = c("grf", "rrcf"), small_sample=FALSE) {
+# 
+#   forest_type <- match.arg(forest_type)
+#   cov_cols <- get_covariate_cols(bundle)
+#   trials <- unique(bundle$trial_id)
+#   
+#   get_pval <- function(trial) {
+#     dt = bundle[bundle$trial_id == trial]
+#     x.test <- dt[, cov_cols, with = FALSE]
+#     pred <- if (forest_type == "grf") dt$crte_hat_grf else dt$crte_hat_glm
+#     poisson_omnibus_pval(pred, dt$Y, dt$A, x.test, small_sample)
+#   }
+#   pvals <- vapply(trials, FUN=get_pval, FUN.VALUE=numeric(1))
+#   mean(pvals < 0.05)
+# }
+# New: returns estimate + CI + counts
+poisson_power_from_bundle_detail <- function(bundle,
+                                             forest_type = c("grf", "rrcf"),
+                                             small_sample = FALSE,
+                                             alpha_test  = 0.05,
+                                             conf_level  = 0.95,
+                                             ci_method   = c("wilson", "jeffreys", "exact")) {
   forest_type <- match.arg(forest_type)
+  ci_method   <- match.arg(ci_method)
+  
   cov_cols <- get_covariate_cols(bundle)
-  trials <- unique(bundle$trial_id)
+  trials   <- unique(bundle$trial_id)
   
   get_pval <- function(trial) {
-    dt = bundle[bundle$trial_id == trial]
+    dt <- bundle[bundle$trial_id == trial]
     x.test <- dt[, cov_cols, with = FALSE]
     pred <- if (forest_type == "grf") dt$crte_hat_grf else dt$crte_hat_glm
     poisson_omnibus_pval(pred, dt$Y, dt$A, x.test, small_sample)
   }
-  pvals <- vapply(trials, FUN=get_pval, FUN.VALUE=numeric(1))
-  mean(pvals < 0.05)
+  
+  pvals <- vapply(trials, FUN = get_pval, FUN.VALUE = numeric(1))
+  n <- length(pvals)
+  k <- sum(pvals < alpha_test)
+  p_hat <- k / n
+  
+  alpha <- 1 - conf_level
+  if (ci_method == "wilson") {
+    z <- qnorm(1 - alpha/2)
+    denom  <- 1 + (z^2)/n
+    center <- (p_hat + (z^2)/(2*n)) / denom
+    halfw  <- (z * sqrt(p_hat*(1 - p_hat)/n + (z^2)/(4*n^2))) / denom
+    lower  <- max(0, center - halfw)
+    upper  <- min(1, center + halfw)
+  } else if (ci_method == "jeffreys") {
+    lower <- qbeta(alpha/2,     k + 0.5, n - k + 0.5)
+    upper <- qbeta(1 - alpha/2, k + 0.5, n - k + 0.5)
+  } else { # exact (Clopper–Pearson)
+    lower <- if (k == 0) 0 else qbeta(alpha/2,     k,     n - k + 1)
+    upper <- if (k == n) 1 else qbeta(1 - alpha/2, k + 1, n - k)
+  }
+  
+  list(
+    estimate   = p_hat,
+    ci_lower   = lower,
+    ci_upper   = upper,
+    n_trials   = n,
+    k_reject   = k,
+    alpha_test = alpha_test,
+    conf_level = conf_level,
+    ci_method  = ci_method
+    # , pvals = pvals  # uncomment if you want to return raw p-values
+  )
 }
 
-mape_from_bundle <- function(bundle, forest_type = c("grf", "rrcf"), trial = NULL) {
-  
-  data <- bundle
-  if (!is.null(trial)) 
-    bundle <- bundle[bundle$trial_id == trial,]
-  
-  pred <- if (forest_type == "grf") bundle$crte_hat_grf else bundle$crte_hat_glm
-  mean(abs((bundle$CRTE - pred)/bundle$CRTE))
+# Original name: remains backward-compatible (still returns a numeric)
+poisson_power_from_bundle <- function(bundle,
+                                      forest_type = c("grf", "rrcf"),
+                                      small_sample = FALSE) {
+  res <- poisson_power_from_bundle_detail(bundle,
+                                          forest_type = forest_type,
+                                          small_sample = small_sample)
+  res$estimate
 }
+
+
+# mape_from_bundle <- function(bundle, forest_type = c("grf", "rrcf"), trial = NULL) {
+#   
+#   data <- bundle
+#   if (!is.null(trial)) 
+#     bundle <- bundle[bundle$trial_id == trial,]
+#   
+#   pred <- if (forest_type == "grf") bundle$crte_hat_grf else bundle$crte_hat_glm
+#   mean(abs((bundle$CRTE - pred)/bundle$CRTE))
+# }
+# New: detailed MAPE with confidence intervals
+# Robust, CI-returning helper (backward-compatible with earlier "detail" API)
+mape_from_bundle_detail <- function(bundle,
+                                    forest_type = c("grf", "rrcf"),
+                                    trial = NULL,
+                                    conf_level = 0.95,
+                                    ci_method  = c("t", "bootstrap"),
+                                    B = 2000,
+                                    # NEW: robustness knobs
+                                    zero_handling     = c("safe", "epsilon", "drop"),
+                                    eps               = 1e-10,
+                                    na_pred_handling  = c("drop", "error")) {
+  
+  forest_type     <- match.arg(forest_type)
+  ci_method       <- match.arg(ci_method)
+  zero_handling   <- match.arg(zero_handling)
+  na_pred_handling<- match.arg(na_pred_handling)
+  alpha <- 1 - conf_level
+  
+  # Choose prediction column (kept consistent with your previous code)
+  get_pred <- function(dt) {
+    if (forest_type == "grf") dt$crte_hat_grf else dt$crte_hat_glm
+  }
+  
+  # Compute MAPE on a data.frame/data.table subset with robust handling
+  point_mape <- function(dt, return_meta = FALSE) {
+    truth <- dt$CRTE
+    pred  <- get_pred(dt)
+    
+    # Non-finite handling
+    finite_mask <- is.finite(truth) & is.finite(pred)
+    n_total <- length(truth)
+    n_nonfinite_pred  <- sum(!is.finite(pred))
+    n_nonfinite_truth <- sum(!is.finite(truth))
+    
+    if (na_pred_handling == "error" && (n_nonfinite_pred > 0 || n_nonfinite_truth > 0)) {
+      stop("Non-finite values detected in truth or predictions.")
+    }
+    
+    dt_used_truth <- truth[finite_mask]
+    dt_used_pred  <- pred[finite_mask]
+    n_used_after_finite <- length(dt_used_truth)
+    
+    # Zero-denominator handling
+    zeros_truth <- dt_used_truth == 0
+    zero_zero_pairs <- zeros_truth & (dt_used_pred == 0)
+    
+    if (zero_handling == "drop") {
+      keep <- !zeros_truth
+      dt_used_truth <- dt_used_truth[keep]
+      dt_used_pred  <- dt_used_pred[keep]
+      zeros_truth   <- zeros_truth[keep]
+      zero_zero_pairs <- zero_zero_pairs[keep]
+    }
+    
+    denom <- abs(dt_used_truth)
+    
+    if (zero_handling %in% c("safe", "epsilon")) {
+      # Prevent divide-by-zero
+      denom <- pmax(denom, eps)
+    }
+    
+    # Absolute percentage errors
+    ape <- abs(dt_used_truth - dt_used_pred) / denom
+    
+    if (zero_handling == "safe") {
+      # Explicitly declare 0/0 as zero error (truth==0 & pred==0)
+      ape[zero_zero_pairs] <- 0
+    }
+    
+    est <- if (length(ape) > 0) mean(ape) else NA_real_
+    
+    if (!return_meta) return(est)
+    
+    list(
+      estimate            = est,
+      n_units_total       = n_total,
+      n_units_used        = length(ape),
+      n_nonfinite_pred    = n_nonfinite_pred,
+      n_nonfinite_truth   = n_nonfinite_truth,
+      n_zero_truth_total  = sum(truth == 0, na.rm = TRUE),
+      n_zero_zero_pairs   = sum(zero_zero_pairs, na.rm = TRUE),
+      zero_handling       = zero_handling,
+      eps                 = eps,
+      na_pred_handling    = na_pred_handling
+    )
+  }
+  
+  # ---- Trial-specific path: unit-level bootstrap CI ----
+  if (!is.null(trial)) {
+    dt <- bundle[bundle$trial_id == trial, ]
+    meta <- point_mape(dt, return_meta = TRUE)
+    est  <- meta$estimate
+    
+    # Build a "used rows" view for bootstrap (respecting drops)
+    # We reconstruct the used rows by filtering dt the same way as point_mape()
+    truth <- dt$CRTE
+    pred  <- get_pred(dt)
+    finite_mask <- is.finite(truth) & is.finite(pred)
+    dt_used <- dt[finite_mask, ]
+    
+    if (zero_handling == "drop") {
+      dt_used <- dt_used[dt_used$CRTE != 0, ]
+    }
+    n_used <- nrow(dt_used)
+    
+    if (is.na(est) || is.null(n_used) || n_used < 2) {
+      return(c(meta,
+               list(ci_lower = NA_real_, ci_upper = NA_real_,
+                    n_trials = 1L, conf_level = conf_level, ci_method = "unit-bootstrap")))
+    }
+    
+    boot_means <- replicate(B, {
+      idx <- sample.int(n_used, size = n_used, replace = TRUE)
+      point_mape(dt_used[idx, ], return_meta = FALSE)
+    })
+    qs <- quantile(boot_means, probs = c(alpha/2, 1 - alpha/2), names = FALSE)
+    
+    return(c(meta,
+             list(ci_lower = qs[1], ci_upper = qs[2],
+                  n_trials = 1L, conf_level = conf_level, ci_method = "unit-bootstrap")))
+  }
+  
+  # ---- Aggregate across trials path ----
+  trials <- sort(unique(bundle$trial_id))
+  
+  # Point estimate: robust mean over all rows (non-finite dropped, zero handling applied)
+  meta_all <- point_mape(bundle, return_meta = TRUE)
+  est <- meta_all$estimate
+  
+  # If multiple trials, CI over trial-level MAPEs; else fall back to unit bootstrap
+  if (length(trials) >= 2) {
+    m_by_trial <- vapply(trials, function(tr) {
+      dt_tr <- bundle[bundle$trial_id == tr, ]
+      point_mape(dt_tr, return_meta = FALSE)
+    }, numeric(1))
+    
+    # Drop trials where MAPE is NA (e.g., no usable rows)
+    m_by_trial <- m_by_trial[is.finite(m_by_trial)]
+    nT <- length(m_by_trial)
+    
+    if (nT >= 2 && ci_method == "t") {
+      s <- sd(m_by_trial)
+      tcrit <- qt(1 - alpha/2, df = nT - 1)
+      halfw <- tcrit * s / sqrt(nT)
+      lower <- est - halfw
+      upper <- est + halfw
+      method <- "t"
+    } else if (nT >= 2 && ci_method == "bootstrap") {
+      boot_means <- replicate(B, mean(sample(m_by_trial, size = nT, replace = TRUE)))
+      qs <- quantile(boot_means, probs = c(alpha/2, 1 - alpha/2), names = FALSE)
+      lower <- qs[1]; upper <- qs[2]; method <- "bootstrap"
+    } else {
+      # Not enough valid trials → unit bootstrap on all usable rows
+      dt <- bundle
+      truth <- dt$CRTE
+      pred  <- get_pred(dt)
+      finite_mask <- is.finite(truth) & is.finite(pred)
+      dt_used <- dt[finite_mask, ]
+      if (zero_handling == "drop") dt_used <- dt_used[dt_used$CRTE != 0, ]
+      n_used <- nrow(dt_used)
+      
+      if (is.na(est) || is.null(n_used) || n_used < 2) {
+        lower <- upper <- NA_real_
+        method <- "unit-bootstrap"
+      } else {
+        boot_means <- replicate(B, {
+          idx <- sample.int(n_used, size = n_used, replace = TRUE)
+          point_mape(dt_used[idx, ], return_meta = FALSE)
+        })
+        qs <- quantile(boot_means, probs = c(alpha/2, 1 - alpha/2), names = FALSE)
+        lower <- qs[1]; upper <- qs[2]; method <- "unit-bootstrap"
+      }
+    }
+    
+    return(c(meta_all,
+             list(ci_lower = lower, ci_upper = upper,
+                  n_trials = length(trials), n_trials_used = nT,
+                  conf_level = conf_level, ci_method = method)))
+  } else {
+    # Single trial present → unit bootstrap CI
+    dt <- bundle
+    truth <- dt$CRTE
+    pred  <- get_pred(dt)
+    finite_mask <- is.finite(truth) & is.finite(pred)
+    dt_used <- dt[finite_mask, ]
+    if (zero_handling == "drop") dt_used <- dt_used[dt_used$CRTE != 0, ]
+    n_used <- nrow(dt_used)
+    
+    if (is.na(est) || is.null(n_used) || n_used < 2) {
+      return(c(meta_all,
+               list(ci_lower = NA_real_, ci_upper = NA_real_,
+                    n_trials = 1L, conf_level = conf_level, ci_method = "unit-bootstrap")))
+    }
+    
+    boot_means <- replicate(B, {
+      idx <- sample.int(n_used, size = n_used, replace = TRUE)
+      point_mape(dt_used[idx, ], return_meta = FALSE)
+    })
+    qs <- quantile(boot_means, probs = c(alpha/2, 1 - alpha/2), names = FALSE)
+    
+    return(c(meta_all,
+             list(ci_lower = qs[1], ci_upper = qs[2],
+                  n_trials = 1L, conf_level = conf_level, ci_method = "unit-bootstrap")))
+  }
+}
+
+# Backward-compatible wrapper: still returns only the point estimate (numeric)
+mape_from_bundle <- function(bundle, forest_type = c("grf", "rrcf"), trial = NULL) {
+  mape_from_bundle_detail(bundle, forest_type = forest_type, trial = trial)$estimate
+}
+
+# Detailed power with CIs for Athey-style omnibus test
+athey_power_from_bundle_detail <- function(bundle,
+                                           forest_type = c("grf", "rrcf"),
+                                           alpha_test = 0.05,
+                                           conf_level = 0.95,
+                                           ci_method = c("wilson", "jeffreys", "exact")) {
+  forest_type <- match.arg(forest_type)
+  ci_method   <- match.arg(ci_method)
+  alpha <- 1 - conf_level
+  
+  rd_pval <- function(base_df, tau_hat) {
+    mask <- is.finite(tau_hat) & stats::complete.cases(base_df)
+    if (sum(mask) < 10) return(NA_real_)
+    Wm <- base_df$W[mask]
+    tab <- table(Wm)
+    if (length(tab) < 2 || any(tab < 5)) return(NA_real_)  # need both arms, min 5 each
+    
+    tau_c <- tau_hat[mask] - mean(tau_hat[mask])
+    int   <- Wm * tau_c
+    if (stats::sd(int) == 0) return(NA_real_)              # no variation ⇒ no test
+    
+    df_b <- base_df[mask, , drop = FALSE]
+    df   <- cbind(df_b, int = int)
+    
+    base <- try(stats::lm(y ~ ., data = df_b), silent = TRUE)
+    add  <- try(stats::lm(y ~ . + int, data = df), silent = TRUE)
+    if (inherits(base, "try-error") || inherits(add, "try-error")) return(NA_real_)
+    
+    # If adding 'int' didn’t increase rank, ANOVA p-value is meaningless
+    if (ncol(stats::model.matrix(add)) == ncol(stats::model.matrix(base))) return(NA_real_)
+    
+    av <- stats::anova(base, add)
+    p  <- suppressWarnings(av$`Pr(>F)`[2])
+    if (!is.finite(p)) NA_real_ else p
+  }
+  
+  cov_cols  <- get_covariate_cols(bundle)
+  trial_ids <- unique(bundle$trial_id)
+  
+  pvals <- rep(NA_real_, length(trial_ids))
+  for (i in seq_along(trial_ids)) {
+    sub <- bundle[trial_id == trial_ids[i]]
+    base_df <- data.frame(y = sub$Y, W = sub$A, sub[, ..cov_cols])
+    cate_hat <- if (forest_type == "grf") sub$cate_hat_grf else sub$cate_hat_glm
+    pvals[i] <- rd_pval(base_df, cate_hat)
+  }
+  
+  n_total <- length(pvals)
+  finite_mask <- is.finite(pvals)
+  n_used  <- sum(finite_mask)
+  n_na    <- n_total - n_used
+  
+  if (n_used == 0) {
+    return(list(
+      estimate    = NA_real_,
+      ci_lower    = NA_real_,
+      ci_upper    = NA_real_,
+      n_trials    = n_total,
+      n_trials_used = n_used,
+      k_reject    = NA_integer_,
+      alpha_test  = alpha_test,
+      conf_level  = conf_level,
+      ci_method   = ci_method,
+      note        = "No valid p-values (all NA/invalid)."
+    ))
+  }
+  
+  k <- sum(pvals[finite_mask] < alpha_test)
+  p_hat <- k / n_used
+  
+  # Binomial proportion CI
+  if (ci_method == "wilson") {
+    z <- stats::qnorm(1 - alpha/2)
+    denom  <- 1 + (z^2)/n_used
+    center <- (p_hat + (z^2)/(2*n_used)) / denom
+    halfw  <- (z * sqrt(p_hat*(1 - p_hat)/n_used + (z^2)/(4*n_used^2))) / denom
+    lower  <- max(0, center - halfw)
+    upper  <- min(1, center + halfw)
+  } else if (ci_method == "jeffreys") {
+    lower <- stats::qbeta(alpha/2,     k + 0.5, n_used - k + 0.5)
+    upper <- stats::qbeta(1 - alpha/2, k + 0.5, n_used - k + 0.5)
+  } else { # exact (Clopper–Pearson)
+    lower <- if (k == 0) 0 else stats::qbeta(alpha/2,     k,     n_used - k + 1)
+    upper <- if (k == n_used) 1 else stats::qbeta(1 - alpha/2, k + 1, n_used)
+  }
+  
+  list(
+    estimate      = p_hat,
+    ci_lower      = lower,
+    ci_upper      = upper,
+    n_trials      = n_total,
+    n_trials_used = n_used,
+    k_reject      = k,
+    alpha_test    = alpha_test,
+    conf_level    = conf_level,
+    ci_method     = ci_method,
+    n_trials_na   = n_na
+  )
+}
+
+# Original wrapper: stays backward-compatible (returns numeric point estimate)
+athey_power_from_bundle <- function(bundle, forest_type = c("grf", "rrcf")) {
+  athey_power_from_bundle_detail(bundle, forest_type = forest_type)$estimate
+}
+
+# Small helper for NULL-coalescing
+`%||%` <- function(a, b) if (!is.null(a)) a else b
+
