@@ -1,23 +1,5 @@
 source("simulate_and_fit_forests.R")
 
-############################################################
-## Master script: MAPE/MAE charts with 5–95% CIs
-## Uses a single plotting function, called by six scenarios:
-##  1) MAPE — two panels: log (left), identity (right)
-##  2) MAE  — two panels: log (left), identity (right)
-##  3) MAPE by sample size (log link) — panels: n in {100, 500, 1000, 2500}
-##  4) MAE  by sample size (log link) — panels: n in {100, 500, 1000, 2500}
-##  5) MAPE by baseline (log link)    — panels: default, 0.05, 0.01
-##  6) MAE  by baseline (log link)    — panels: default, 0.05, 0.01
-##
-## Requires in scope:
-##   - load_bundle()
-##   - mape_from_bundle_ci(bundle, forest_type=c("grf","rrcf"))
-##   - mae_from_bundle_ci(bundle,  forest_type=c("grf","rrcf"))
-## If needed:
-# source("simulate_and_fit_forests.R")
-############################################################
-
 library(dplyr)
 library(tidyr)
 library(purrr)
@@ -26,9 +8,6 @@ library(scales)
 
 `%||%` <- function(a, b) if (!is.null(a)) a else b
 
-# ------------------------------
-# Plot utility (with 5–95% CI error bars + slight horizontal dodge)
-# ------------------------------
 plot_with_ci <- function(data,
                          facet_by,
                          metric = c("mape","mae"),
@@ -36,7 +15,9 @@ plot_with_ci <- function(data,
                          subtitle = NULL,
                          share_y = FALSE,
                          save = NULL,   # list(dir="charts", name_components=c(...), timestamp_fmt="%Y%m%d%H%M", width_in=11, height_in=6)
-                         style = list()) {
+                         style = list(),
+                         facet_nrow = 1,          # <— NEW
+                         facet_ncol = NULL) {
   
   metric <- match.arg(metric)
   stopifnot(is.data.frame(data),
@@ -108,7 +89,12 @@ plot_with_ci <- function(data,
   
   if (!missing(facet_by) && length(facet_by) > 0) {
     facet_formula <- stats::as.formula(paste("~", paste(facet_by, collapse = " + ")))
-    p <- p + ggplot2::facet_wrap(facet_formula, nrow = 1, scales = if (share_y) "fixed" else "free_y")
+    p <- p + ggplot2::facet_wrap(
+      facet_formula,
+      nrow   = facet_nrow,                      # <— use new arg
+      ncol   = facet_ncol,                      # <— use new arg
+      scales = if (share_y) "fixed" else "free_y"
+    )
   }
   
   outfile <- NULL
@@ -145,8 +131,8 @@ get_mape_ci <- function(b) {
   tibble::tibble(
     method    = c("GRF","RRCF"),
     estimate  = c(as.numeric(d_grf$mape),  as.numeric(d_rrcf$mape)),
-    ci_lower  = c(as.numeric(d_grf$quantile_5),  as.numeric(d_rrcf$quantile_5)),
-    ci_upper  = c(as.numeric(d_grf$quantile_95), as.numeric(d_rrcf$quantile_95))
+    ci_lower  = c(as.numeric(d_grf$lower_se),  as.numeric(d_rrcf$lower_se)),
+    ci_upper  = c(as.numeric(d_grf$upper_se), as.numeric(d_rrcf$upper_se))
   )
 }
 
@@ -156,101 +142,113 @@ get_mae_ci <- function(b) {
   tibble::tibble(
     method    = c("GRF","RRCF"),
     estimate  = c(as.numeric(d_grf$mae),  as.numeric(d_rrcf$mae)),
-    ci_lower  = c(as.numeric(d_grf$quantile_5),  as.numeric(d_rrcf$quantile_5)),
-    ci_upper  = c(as.numeric(d_grf$quantile_95), as.numeric(d_rrcf$quantile_95))
+    ci_lower  = c(as.numeric(d_grf$lower_se),  as.numeric(d_rrcf$lower_se)),
+    ci_upper  = c(as.numeric(d_grf$upper_se), as.numeric(d_rrcf$upper_se))
   )
 }
 
 # ======================================================================
-# (1) MAPE — two panels: log (left), identity (right)
+# (1) MAPE — single chart log link
 # ======================================================================
-grid_LI <- tidyr::expand_grid(link_type = links, rho = rhos)
+# Build only the log-link data (no identity), same rho grid
+grid_log <- tidyr::expand_grid(link_type = "log", rho = rhos)
 
-df_mape_LI <- purrr::pmap_dfr(grid_LI, function(link_type, rho) {
+df_mape_log <- purrr::pmap_dfr(grid_log, function(link_type, rho) {
   b <- load_bundle(n = n_default, rho = rho, link_type = link_type, p_base = pbase_def)
   get_mape_ci(b) |>
-    mutate(link_type = link_type, rho = rho, metric = "mape", n = n_default, p_base = NA_real_)
+    dplyr::mutate(link_type = link_type, rho = rho, metric = "mape", n = n_default, p_base = NA_real_)
 }) |>
-  mutate(method = factor(method, levels = c("RRCF","GRF")),
-         link_type = factor(link_type, levels = c("log","identity")))
+  dplyr::mutate(method = factor(method, levels = c("RRCF","GRF"))) |>
+  dplyr::select(-link_type)  # drop since we're plotting a single panel
 
 plot_with_ci(
-  data         = df_mape_LI,
-  facet_by     = "link_type",
-  metric       = "mape",
-  title        = sprintf("MAPE vs Heterogeneity (n = %d, default baseline)", n_default),
-  subtitle     = "Error bars: 5-95% quantiles; slight horizontal dodge to avoid overlap",
-  share_y      = FALSE,
-  save         = list(dir="charts", name_components=c("log_identity","mape_ci"),
-                      timestamp_fmt="%Y%m%d%H%M", width_in=11, height_in=6)
+  data     = df_mape_log,
+  facet_by = NULL,                 # single panel
+  metric   = "mape",
+  title    = "MAPE vs Heterogeneity (log link, CRTE scale)",
+  subtitle = "Blue: RRCF; Green: GRF. Error bars: mean ± 1 SE across replicates.",
+  share_y  = FALSE,
+  save     = list(dir = "charts",
+                  name_components = c("log", "mape_single"),
+                  timestamp_fmt = "%Y%m%d%H%M",
+                  width_in = 7, height_in = 4.5)
 )
 
 # ======================================================================
-# (2) MAE — two panels: log (left), identity (right)
+# (2) MAE — single panel: identity link
 # ======================================================================
-df_mae_LI <- purrr::pmap_dfr(grid_LI, function(link_type, rho) {
+# Build only the identity-link data (no log), same rho grid
+grid_id <- tidyr::expand_grid(link_type = "identity", rho = rhos)
+
+df_mae_id <- purrr::pmap_dfr(grid_id, function(link_type, rho) {
   b <- load_bundle(n = n_default, rho = rho, link_type = link_type, p_base = pbase_def)
   get_mae_ci(b) |>
-    mutate(link_type = link_type, rho = rho, metric = "mae", n = n_default, p_base = NA_real_)
+    dplyr::mutate(link_type = link_type, rho = rho, metric = "mae", n = n_default, p_base = NA_real_)
 }) |>
-  mutate(method = factor(method, levels = c("RRCF","GRF")),
-         link_type = factor(link_type, levels = c("log","identity")))
+  dplyr::mutate(method = factor(method, levels = c("RRCF","GRF"))) |>
+  dplyr::select(-link_type)  # drop since we're plotting a single panel
 
 plot_with_ci(
-  data         = df_mae_LI,
-  facet_by     = "link_type",
-  metric       = "mae",
-  title        = sprintf("MAE vs Heterogeneity (n = %d, default baseline)", n_default),
-  subtitle     = "Error bars: 5-95% quantiles; slight horizontal dodge to avoid overlap",
-  share_y      = FALSE,
-  save         = list(dir="charts", name_components=c("log_identity","mae_ci"),
-                      timestamp_fmt="%Y%m%d%H%M", width_in=11, height_in=6)
+  data     = df_mae_id,
+  facet_by = NULL,                 # single panel
+  metric   = "mae",
+  title    = "MAE vs Heterogeneity (identity link, CATE scale)",
+  subtitle = "Blue: RRCF; Green: GRF. Error bars: mean ± 1 SE across replicates.",
+  share_y  = FALSE,
+  save     = list(dir = "charts",
+                  name_components = c("identity", "mae_single"),
+                  timestamp_fmt = "%Y%m%d%H%M",
+                  width_in = 7, height_in = 4.5)
 )
 
 # ======================================================================
 # (3) MAPE by sample size (log link) — panels: n in {100, 500, 1000, 2500}
 # ======================================================================
-grid_n <- tidyr::expand_grid(n = ns, rho = rhos)
-
-df_mape_n <- purrr::pmap_dfr(grid_n, function(n, rho) {
-  b <- load_bundle(n = n, rho = rho, link_type = "log", p_base = pbase_def)
-  get_mape_ci(b) |>
-    mutate(n = n, rho = rho, link_type = "log", metric = "mape", p_base = NA_real_)
-}) |>
-  mutate(method = factor(method, levels = c("RRCF","GRF")),
-         n = factor(n, levels = ns))
 
 plot_with_ci(
   data         = df_mape_n,
   facet_by     = "n",
   metric       = "mape",
-  title        = "MAPE vs Heterogeneity by Sample Size (log link)",
-  subtitle     = "Error bars: 5-95% quantiles; slight horizontal dodge to avoid overlap",
+  title        = "MAPE vs Heterogeneity by Sample Size (log link, CRTE scale)",
+  subtitle     = "Blue: RRCF; Green: GRF. Error bars: mean ± 1 SE across replicates.",
   share_y      = FALSE,
-  save         = list(dir="charts", name_components=c("log","mape_ci_by_n"),
-                      timestamp_fmt="%Y%m%d%H%M", width_in=18, height_in=5.5)
+  facet_nrow   = 2,                 # <— 2 rows × 2 columns
+  save         = list(dir = "charts",
+                      name_components = c("log","mape_ci_by_n"),
+                      timestamp_fmt   = "%Y%m%d%H%M",
+                      width_in        = 12,      # slightly taller/wider for 2×2
+                      height_in       = 8)
 )
 
 # ======================================================================
-# (4) MAE by sample size (log link) — panels: n in {100, 500, 1000, 2500}
+# (4) MAE by sample size (identity link) — panels: n in {100, 500, 1000, 2500}
 # ======================================================================
-df_mae_n <- purrr::pmap_dfr(grid_n, function(n, rho) {
-  b <- load_bundle(n = n, rho = rho, link_type = "log", p_base = pbase_def)
-  get_mae_ci(b) |>
-    mutate(n = n, rho = rho, link_type = "log", metric = "mae", p_base = NA_real_)
-}) |>
-  mutate(method = factor(method, levels = c("RRCF","GRF")),
-         n = factor(n, levels = ns))
+# If not already defined earlier:
+# grid_n <- tidyr::expand_grid(n = ns, rho = rhos)
 
+# data build stays the same
+df_mae_n_id <- purrr::pmap_dfr(grid_n, function(n, rho) {
+  b <- load_bundle(n = n, rho = rho, link_type = "identity", p_base = pbase_def)
+  get_mae_ci(b) |>
+    dplyr::mutate(n = n, rho = rho, link_type = "identity", metric = "mae", p_base = NA_real_)
+}) |>
+  dplyr::mutate(method = factor(method, levels = c("RRCF","GRF")),
+                n = factor(n, levels = ns))
+
+# 2×2 facet layout, same filename pattern
 plot_with_ci(
-  data         = df_mae_n,
+  data         = df_mae_n_id,
   facet_by     = "n",
   metric       = "mae",
-  title        = "MAE vs Heterogeneity by Sample Size (log link)",
-  subtitle     = "Error bars: 5-95% quantiles; slight horizontal dodge to avoid overlap",
+  title        = "MAE vs Heterogeneity by Sample Size (identity link, CATE scale)",
+  subtitle     = "Blue: RRCF; Green: GRF. Error bars: mean ± 1 SE across replicates.",
   share_y      = FALSE,
-  save         = list(dir="charts", name_components=c("log","mae_ci_by_n"),
-                      timestamp_fmt="%Y%m%d%H%M", width_in=18, height_in=5.5)
+  facet_nrow   = 2,                    # <-- new: 2 rows × 2 cols
+  save         = list(dir = "charts",
+                      name_components = c("identity","mae_ci_by_n"),
+                      timestamp_fmt   = "%Y%m%d%H%M",
+                      width_in        = 12,       # adjust size for 2×2
+                      height_in       = 8)
 )
 
 # ======================================================================
@@ -262,18 +260,26 @@ df_mape_pb <- purrr::pmap_dfr(grid_pb, function(p_base, rho) {
   pb <- if (is.na(p_base)) NULL else p_base
   b  <- load_bundle(n = n_default, rho = rho, link_type = "log", p_base = pb)
   get_mape_ci(b) |>
-    mutate(p_base = p_base, rho = rho, link_type = "log", metric = "mape", n = n_default)
+    dplyr::mutate(p_base = p_base, rho = rho, link_type = "log", metric = "mape", n = n_default)
 }) |>
-  mutate(method = factor(method, levels = c("RRCF","GRF")))
+  dplyr::mutate(
+    method     = factor(method, levels = c("RRCF","GRF")),
+    # create a facet label with desired ordering
+    p_base_lab = factor(
+      ifelse(is.na(p_base), "default", format(p_base, trim = TRUE)),
+      levels = c("default", "0.05", "0.01")
+    )
+  )
 
 plot_with_ci(
   data         = df_mape_pb,
-  facet_by     = "p_base",
+  facet_by     = "p_base_lab",  # <- facet on the ordered label
   metric       = "mape",
-  title        = "MAPE vs Heterogeneity by Baseline (log link)",
-  subtitle     = "Error bars: 5-95% quantiles; slight horizontal dodge to avoid overlap",
+  # title        = "MAPE vs Heterogeneity by Baseline (log link, CRTE scale)",
+  # subtitle     = "Blue: RRCF; Green: GRF. Error bars: mean ± 1 SE across replicates.",
   share_y      = FALSE,
-  save         = list(dir="charts", name_components=c("log","mape_ci_by_baseline"),
+  save         = list(dir="charts",
+                      name_components=c("log","mape_ci_by_baseline"),
                       timestamp_fmt="%Y%m%d%H%M", width_in=13, height_in=5.5)
 )
 
@@ -284,19 +290,29 @@ df_mae_pb <- purrr::pmap_dfr(grid_pb, function(p_base, rho) {
   pb <- if (is.na(p_base)) NULL else p_base
   b  <- load_bundle(n = n_default, rho = rho, link_type = "log", p_base = pb)
   get_mae_ci(b) |>
-    mutate(p_base = p_base, rho = rho, link_type = "log", metric = "mae", n = n_default)
+    dplyr::mutate(p_base = p_base, rho = rho, link_type = "log", metric = "mae", n = n_default)
 }) |>
-  mutate(method = factor(method, levels = c("RRCF","GRF")))
+  dplyr::mutate(
+    method     = factor(method, levels = c("RRCF","GRF")),
+    # ordered facet labels: default -> 0.05 -> 0.01
+    p_base_lab = factor(
+      ifelse(is.na(p_base), "default", format(p_base, trim = TRUE)),
+      levels = c("default", "0.05", "0.01")
+    )
+  )
 
 plot_with_ci(
   data         = df_mae_pb,
-  facet_by     = "p_base",
+  facet_by     = "p_base_lab",  # facet on the ordered label
   metric       = "mae",
-  title        = "MAE vs Heterogeneity by Baseline (log link)",
-  subtitle     = "Error bars: 5-95% quantiles; slight horizontal dodge to avoid overlap",
+  # title        = "MAE vs Heterogeneity by Baseline (log link, CATE scale)",
+  # subtitle     = "Blue: RRCF; Green: GRF. Error bars: mean ± 1 SE across replicates.",
   share_y      = FALSE,
-  save         = list(dir="charts", name_components=c("log","mae_ci_by_baseline"),
-                      timestamp_fmt="%Y%m%d%H%M", width_in=13, height_in=5.5)
+  save         = list(dir = "charts",
+                      name_components = c("log","mae_ci_by_baseline"),
+                      timestamp_fmt   = "%Y%m%d%H%M",
+                      width_in        = 13, height_in = 5.5)
 )
+
 
 # Done — six PDFs saved under ./charts/

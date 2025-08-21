@@ -1,3 +1,26 @@
+# ==============================================================================
+# Simulation and analysis framework for comparing GRF and RRCF models
+# in the randomized controlled trial (RCT) setting.
+#
+# This module defines:
+#   * Copula-based data generating processes (DGPs) with log-link (multiplicative)
+#     and identity-link (additive) outcome models, adapted from Shirvaikar (2025).
+#   * Calibration routines to control the marginal untreated risk p_base = P[Y^(0)=1].
+#   * Bundle functions for generating repeated simulated datasets, splitting into
+#     train/test sets, and fitting GRF and RRCF models.
+#   * Evaluation functions for model performance:
+#       - Pointwise error metrics: MAPE (CRTE scale) and MAE (CATE scale),
+#         reported with mean ± standard error across trials.
+#       - Omnibus heterogeneity tests (Poisson LRT on the log scale,
+#         and additive-scale analogue via linear probability models).
+#
+# The focus here is on the RCT setting, in order to isolate methodological
+# questions of estimand choice, sample size, and baseline prevalence,
+# without the additional complications of confounding present in observational data.
+#
+# This code underpins the experimental results reported in the thesis.
+# ==============================================================================
+
 library(causl)
 library(data.table)
 library(sandwich)
@@ -7,7 +30,12 @@ library(grf)
 library(rrcf)
 library(parallel)
 
-
+# ------------------------------------------------------------------------------
+# Pre-computed expectation constant: E[exp{h(C)}] under the default coefficients
+# and distributional assumptions for C1 and C4 in the untreated outcome model.
+# Used to calibrate the intercept so that the marginal untreated risk equals
+# the specified baseline p_base. If you change any h(C) coefficients or the
+# distribution of C4, recompute this value with compute_Eexp_h().
 .EEXP_H_CONST <- 1.20332119584
 
 # ------------------------------------------------------------------------------
@@ -375,18 +403,22 @@ mape_from_bundle <- function(bundle, forest_type = c("grf", "rrcf"), trial = NUL
 mape_from_bundle_ci <- function(bundle, forest_type = c("grf", "rrcf")) {
   
   pred <- if (forest_type == "grf") bundle$crte_hat_grf else bundle$crte_hat_glm
-  ape <- abs((bundle$CRTE - pred)/bundle$CRTE)
-  q <- quantile(ape[is.finite(ape)], c(0.05, 0.95), na.rm=TRUE)
-  list('mape'=mean(ape[is.finite(ape)], na.rm=TRUE), 'quantile_5'=q[1], 'quantile_95'=q[2])
-
+  means <- aggregate(abs((CRTE - pred)/CRTE) ~ trial_id, data = bundle, FUN = function(x) mean(x[is.finite(x)], na.rm = TRUE))[, 2]
+  means <- means[is.finite(means)]
+  mean_val <- mean(means, na.rm = TRUE)
+  se <- sd(means, na.rm = TRUE) / sqrt(length(means))
+  list(mape = mean_val, lower_se = mean_val - se, upper_se = mean_val + se)
+  
 }
+
 
 mae_from_bundle_ci <- function(bundle, forest_type = c("grf", "rrcf")) {
   
   pred <- if (forest_type == "grf") bundle$cate_hat_grf else bundle$cate_hat_glm
-  ae <- abs(bundle$CATE - pred)
-  q <- quantile(ae, c(0.05, 0.95))
-  list('mae'=mean(ae), 'quantile_5'=q[1], 'quantile_95'=q[2])
+  means <- aggregate(abs(CATE - pred) ~ trial_id, data = bundle, FUN = mean)[,2]
+  mean_val <- mean(means)
+  se <- sd(means) / sqrt(length(means))
+  list(mae = mean_val, lower_se = mean_val - se, upper_se = mean_val + se)
 }
 
 mae_from_bundle <- function(bundle, forest_type = c("grf", "rrcf")) {
