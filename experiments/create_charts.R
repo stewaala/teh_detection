@@ -1,3 +1,21 @@
+############################################################
+## Master script: MAPE/MAE charts with 5–95% CIs
+## Uses a single plotting function, called by six scenarios:
+##  1) MAPE — two panels: log (left), identity (right)
+##  2) MAE  — two panels: log (left), identity (right)
+##  3) MAPE by sample size (log link) — panels: n in {100, 500, 1000, 2500}
+##  4) MAE  by sample size (log link) — panels: n in {100, 500, 1000, 2500}
+##  5) MAPE by baseline (log link)    — panels: default, 0.05, 0.01
+##  6) MAE  by baseline (log link)    — panels: default, 0.05, 0.01
+##
+## Requires in scope:
+##   - load_bundle()
+##   - mape_from_bundle_ci(bundle, forest_type=c("grf","rrcf"))
+##   - mae_from_bundle_ci(bundle,  forest_type=c("grf","rrcf"))
+## If needed:
+# source("simulate_and_fit_forests.R")
+############################################################
+
 source("simulate_and_fit_forests.R")
 
 library(dplyr)
@@ -55,7 +73,8 @@ plot_with_ci <- function(data,
   }
   
   y_label <- if (metric == "mape") "MAPE" else "MAE"
-  if (is.null(title))  title <- paste0(y_label, " vs Heterogeneity")
+  #if (is.null(title))  title <- paste0(y_label, " vs Heterogeneity")
+  if (is.null(title))  title <- ""
   
   # Percent axis for MAPE; raw for MAE
   y_scale <- if (metric == "mape") ggplot2::scale_y_continuous(labels = scales::percent_format(accuracy = 1))
@@ -165,8 +184,8 @@ plot_with_ci(
   data     = df_mape_log,
   facet_by = NULL,                 # single panel
   metric   = "mape",
-  title    = "MAPE vs Heterogeneity (log link, CRTE scale)",
-  subtitle = "Blue: RRCF; Green: GRF. Error bars: mean ± 1 SE across replicates.",
+  #title    = "MAPE vs Heterogeneity (log link, CRTE scale)",
+  #subtitle = "Blue: RRCF; Green: GRF. Error bars: mean ± 1 SE across replicates.",
   share_y  = FALSE,
   save     = list(dir = "charts",
                   name_components = c("log", "mape_single"),
@@ -192,8 +211,8 @@ plot_with_ci(
   data     = df_mae_id,
   facet_by = NULL,                 # single panel
   metric   = "mae",
-  title    = "MAE vs Heterogeneity (identity link, CATE scale)",
-  subtitle = "Blue: RRCF; Green: GRF. Error bars: mean ± 1 SE across replicates.",
+  #title    = "MAE vs Heterogeneity (identity link, CATE scale)",
+  #subtitle = "Blue: RRCF; Green: GRF. Error bars: mean ± 1 SE across replicates.",
   share_y  = FALSE,
   save     = list(dir = "charts",
                   name_components = c("identity", "mae_single"),
@@ -205,12 +224,22 @@ plot_with_ci(
 # (3) MAPE by sample size (log link) — panels: n in {100, 500, 1000, 2500}
 # ======================================================================
 
+grid_n <- tidyr::expand_grid(n = ns, rho = rhos)
+
+df_mape_n <- purrr::pmap_dfr(grid_n, function(n, rho) {
+  b <- load_bundle(n = n, rho = rho, link_type = "log", p_base = pbase_def)
+  get_mape_ci(b) |>
+    mutate(n = n, rho = rho, link_type = "log", metric = "mape", p_base = NA_real_)
+}) |>
+  mutate(method = factor(method, levels = c("RRCF","GRF")),
+         n = factor(n, levels = ns))
+
 plot_with_ci(
   data         = df_mape_n,
   facet_by     = "n",
   metric       = "mape",
-  title        = "MAPE vs Heterogeneity by Sample Size (log link, CRTE scale)",
-  subtitle     = "Blue: RRCF; Green: GRF. Error bars: mean ± 1 SE across replicates.",
+  #title        = "MAPE vs Heterogeneity by Sample Size (log link, CRTE scale)",
+  #subtitle     = "Blue: RRCF; Green: GRF. Error bars: mean ± 1 SE across replicates.",
   share_y      = FALSE,
   facet_nrow   = 2,                 # <— 2 rows × 2 columns
   save         = list(dir = "charts",
@@ -240,8 +269,8 @@ plot_with_ci(
   data         = df_mae_n_id,
   facet_by     = "n",
   metric       = "mae",
-  title        = "MAE vs Heterogeneity by Sample Size (identity link, CATE scale)",
-  subtitle     = "Blue: RRCF; Green: GRF. Error bars: mean ± 1 SE across replicates.",
+  #title        = "MAE vs Heterogeneity by Sample Size (identity link, CATE scale)",
+  #subtitle     = "Blue: RRCF; Green: GRF. Error bars: mean ± 1 SE across replicates.",
   share_y      = FALSE,
   facet_nrow   = 2,                    # <-- new: 2 rows × 2 cols
   save         = list(dir = "charts",
@@ -316,3 +345,39 @@ plot_with_ci(
 
 
 # Done — six PDFs saved under ./charts/
+# --- Side-by-side MAPE (log link, n = 2500): Z = 0 vs Z = 50 -----------------
+
+rhos        <- c(0.25, 0.5, 0.75)
+n_default   <- 2500
+pbase_def   <- NULL  # NULL => default baseline
+
+build_mape_df <- function(n_extra) {
+  grid <- tidyr::expand_grid(rho = rhos)
+  purrr::pmap_dfr(grid, function(rho) {
+    b <- load_bundle(n = n_default, rho = rho, link_type = "log",
+                     p_base = pbase_def, n_extra = n_extra)
+    get_mape_ci(b) |>
+      dplyr::mutate(rho = rho, metric = "mape")
+  }) |>
+    dplyr::mutate(method = factor(method, levels = c("RRCF","GRF")))
+}
+
+df0  <- build_mape_df(0)  |> dplyr::mutate(feature_set = "Z = 0")
+df50 <- build_mape_df(50) |> dplyr::mutate(feature_set = "Z = 50")
+
+df_mape_side <- dplyr::bind_rows(df0, df50) |>
+  dplyr::mutate(feature_set = factor(feature_set, levels = c("Z = 0","Z = 50")))
+
+plot_with_ci(
+  data       = df_mape_side,
+  facet_by   = "feature_set",   # two panels: left = Z=0, right = Z=50
+  metric     = "mape",
+  share_y    = TRUE,            # same y-axis so lines are directly comparable
+  facet_nrow = 1,
+  facet_ncol = 2,
+  save       = list(dir = "charts",
+                    name_components = c("log","mape_ci_side_by_side","n2500","Z050"),
+                    timestamp_fmt   = "%Y%m%d%H%M",
+                    width_in        = 12,
+                    height_in       = 4.5)
+)

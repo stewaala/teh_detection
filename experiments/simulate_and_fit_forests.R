@@ -21,6 +21,8 @@
 # This code underpins the experimental results reported in the thesis.
 # ==============================================================================
 
+source("covariate_augmentation.R")
+
 library(causl)
 library(data.table)
 library(sandwich)
@@ -249,13 +251,23 @@ format_baseline_tag <- function(p_base) {
 # ------------------------------------------------------------------------------
 # Build the full filename base using the new helper
 # ------------------------------------------------------------------------------
-make_base_filename <- function(n, rho, link_type, p_base) {
+# make_base_filename <- function(n, rho, link_type, p_base) {
+#   baseline_tag <- format_baseline_tag(p_base)
+#   sprintf("n%05d_rho%02d_%s_%s",
+#           n,
+#           round(rho * 100),
+#           link_type,
+#           baseline_tag)
+# }
+make_base_filename <- function(n, rho, link_type, p_base, n_extra = 0) {
   baseline_tag <- format_baseline_tag(p_base)
-  sprintf("n%05d_rho%02d_%s_%s",
+  extra_tag <- if (is.null(n_extra) || n_extra == 0) "" else sprintf("_Z%03d", as.integer(n_extra))
+  sprintf("n%05d_rho%02d_%s_%s%s",
           n,
           round(rho * 100),
           link_type,
-          baseline_tag)
+          baseline_tag,
+          extra_tag)
 }
 
 rd_predict <- function(object, newdata) {
@@ -275,30 +287,36 @@ rd_predict <- function(object, newdata) {
   output
 }
 
-make_and_save_bundle <- function(n, rho, link_type = c("log", "identity"), num_trials=100, p_base = NULL, num_trees = 500, test_frac = 0.2, skip_if_file_exists=TRUE) {
+make_and_save_bundle <- function(n, rho, link_type = c("log", "identity"), num_trials=100, p_base = NULL, num_trees = 500, test_frac = 0.2, skip_if_file_exists=TRUE, n_extra = 0) {
 
   out_dir <- "data"
-  fname_base <- make_base_filename(n, rho, link_type, p_base)
+  fname_base <- make_base_filename(n, rho, link_type, p_base, n_extra)
   bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
 
   if (file.exists(bundle_file) && skip_if_file_exists) {
     return()
   }
-  bundle <- make_bundle(n, rho, link_type, num_trials, p_base, num_trees, test_frac)
+  bundle <- make_bundle(n, rho, link_type, num_trials, p_base, num_trees, test_frac, n_extra)
   saveRDS(bundle, file = bundle_file)
   
 }
 
-make_bundle <- function(n, rho, link_type = c("log", "identity"), num_trials=100, p_base = NULL, num_trees = 500, test_frac = 0.2) {
+make_bundle <- function(n, rho, link_type = c("log", "identity"), num_trials=100, p_base = NULL, num_trees = 500, test_frac = 0.2, n_extra = 0) {
   
   link_type <- match.arg(link_type)
 
   one_trial <- function(idx) {
 
-    sim_fun  <- if (link_type == "log") copula_rct_log else copula_rct_identity
-    sim_args <- list(n = n, rho = rho, seed = idx)
-    if (!is.null(p_base)) sim_args$p_base <- p_base
-    dat <- suppressWarnings(do.call(sim_fun, sim_args))
+    if (link_type == "log" && n_extra > 0) {
+      plus_args <- list(n = n, rho = rho, seed = idx, P = n_extra)
+      if (!is.null(p_base)) plus_args$p_base <- p_base
+      dat <- suppressWarnings(do.call(copula_rct_log_plusZ, plus_args))
+    } else {
+      sim_fun  <- if (link_type == "log") copula_rct_log else copula_rct_identity
+      sim_args <- list(n = n, rho = rho, seed = idx)
+      if (!is.null(p_base)) sim_args$p_base <- p_base
+      dat <- suppressWarnings(do.call(sim_fun, sim_args))
+    }
     
     x <- dat[, !c("A", "Y", "CRTE", "CATE"), with = FALSE]
     set.seed(idx)
@@ -341,11 +359,11 @@ get_covariate_cols <- function(dt) {
   setdiff(names(dt), drop_cols)
 }
  
-load_bundle <- function(n, rho, link_type=c("log", "identity"), p_base=NULL) {
+load_bundle <- function(n, rho, link_type=c("log", "identity"), p_base=NULL, n_extra = 0) {
 
   out_dir = "data"
   link_type <- match.arg(link_type)
-  fname_base <- make_base_filename(n, rho, link_type, p_base)
+  fname_base <- make_base_filename(n, rho, link_type, p_base, n_extra)
   bundle_file <- file.path(out_dir, paste0("bundle_", fname_base, ".rds"))
   if (!file.exists(bundle_file))
     stop("Cannot find bundle file: ", bundle_file)
